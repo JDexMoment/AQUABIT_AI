@@ -1,0 +1,36 @@
+# Локальные данные и результаты (только в корне проекта)
+/data/
+/data_cleaned/
+/reports/
+/training_epanet_ai/
+/models/
+/datasets/
+/checkpoints/
+# Крупные веса и промежуточные файлы моделей
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.bin
+*.part
+# Окружения и кэши
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.huggingface/
+.coverage
+# Секреты
+.env
+.env.*
+!.env.example
+# Система
+.DS_Store
+Thumbs.db

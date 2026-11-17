@@ -1,0 +1,3 @@
+[console_scripts]
+aquabit-ai = aquabit_ai.cli:app
+epanet-ai = aquabit_ai.cli:app
