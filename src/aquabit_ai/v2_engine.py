@@ -1,4 +1,4 @@
-"""EPANET-AI v3 Processing, Topology Repair & Hydraulic Facts Engine for ПК «Аквабит»."""
+"""EPANET-AI v3.2 Processing, Topology Repair, Graph Neighborhood Diagnostics & Hydraulic Facts Engine for ПК «Аквабит»."""
 
 from __future__ import annotations
 
@@ -130,6 +130,16 @@ def clean_object_name(raw_name: str | None) -> str:
     return re.sub(r"\s*\(\s*Google\s*\)\s*", "", str(raw_name), flags=re.IGNORECASE).strip()
 
 
+def format_step_to_hhmm(step_idx: int, total_steps: int) -> str:
+    """Форматирует индекс шага симуляции в чистый формат ЧЧ:ММ без технических меток (R360)."""
+    if total_steps <= 1:
+        return "00:00"
+    total_minutes = int(round((step_idx / max(total_steps, 1)) * 1440.0)) % 1440
+    hh = total_minutes // 60
+    mm = total_minutes % 60
+    return f"{hh:02d}:{mm:02d}"
+
+
 def evaluate_qh_curve_head(pts: list[tuple[float, float]], q_val: float) -> float | None:
     if not pts:
         return None
@@ -199,29 +209,60 @@ def _stream_wide_timeseries(
     hourly_mode: str = "sum",
     filter_ids: set[str] | None = None,
     keep_row_hourly: bool = False,
+    timeline_buckets: int = 48,
 ) -> dict[str, Any]:
     if fpath is None or not fpath.exists() or fpath.stat().st_size == 0:
-        return {"exists": False, "n_steps": 0, "step_names": [], "rows": {}, "hourly_24": None, "row_hourly": {}}
+        return {
+            "exists": False,
+            "n_steps": 0,
+            "step_names": [],
+            "rows": {},
+            "hourly_24": None,
+            "row_hourly": {},
+            "timeline_labels": [],
+        }
 
     with fpath.open("r", encoding="utf-8-sig", errors="replace") as fh:
         first_line = fh.readline().strip()
     if not first_line:
-        return {"exists": False, "n_steps": 0, "step_names": [], "rows": {}, "hourly_24": None, "row_hourly": {}}
+        return {
+            "exists": False,
+            "n_steps": 0,
+            "step_names": [],
+            "rows": {},
+            "hourly_24": None,
+            "row_hourly": {},
+            "timeline_labels": [],
+        }
 
     hdr = [c.strip() for c in first_line.split(",")]
     step_cols = [c for c in hdr[1:] if c]
     n_steps = len(step_cols)
     if n_steps == 0:
-        return {"exists": True, "n_steps": 0, "step_names": [], "rows": {}, "hourly_24": None, "row_hourly": {}}
+        return {
+            "exists": True,
+            "n_steps": 0,
+            "step_names": [],
+            "rows": {},
+            "hourly_24": None,
+            "row_hourly": {},
+            "timeline_labels": [],
+        }
 
-    n_buckets = min(24, n_steps)
-    bucket_indices = np.array_split(np.arange(n_steps), n_buckets)
-    bucket_step_labels = [step_cols[idxs[len(idxs) // 2]] for idxs in bucket_indices]
+    # 24 часовых корзины для суточных графиков
+    n_buckets_24 = min(24, n_steps)
+    bucket_indices_24 = np.array_split(np.arange(n_steps), n_buckets_24)
+
+    # Детальные корзины для временной шкалы карты (например, 48 шагов по 30 мин или 96 по 15 мин)
+    n_tl = min(max(24, timeline_buckets), n_steps)
+    tl_indices = np.array_split(np.arange(n_steps), n_tl)
+    tl_mid_cols = [int(idxs[len(idxs) // 2]) for idxs in tl_indices]
+    timeline_labels = [format_step_to_hhmm(c_idx, n_steps) for c_idx in tl_mid_cols]
 
     row_stats: dict[str, dict[str, Any]] = {}
     row_hourly: dict[str, list[float | None]] = {}
-    hourly_sum = np.zeros(n_buckets, dtype=np.float64)
-    hourly_samples_p: list[list[np.ndarray]] = [[] for _ in range(n_buckets)]
+    hourly_sum = np.zeros(n_buckets_24, dtype=np.float64)
+    hourly_samples_p: list[list[np.ndarray]] = [[] for _ in range(n_buckets_24)]
     valid_numeric_any = False
 
     with fpath.open("r", encoding="utf-8-sig", errors="replace") as stream:
@@ -254,7 +295,7 @@ def _stream_wide_timeseries(
 
             mat_kept = mat[keep_mask]
             if mat_kept.shape[0] > 0:
-                for b_idx, cols_idx in enumerate(bucket_indices):
+                for b_idx, cols_idx in enumerate(bucket_indices_24):
                     sub = mat_kept[:, cols_idx]
                     if hourly_mode == "sum":
                         row_hour_means = np.nanmean(np.where(np.isfinite(sub), sub, 0.0), axis=1)
@@ -270,10 +311,9 @@ def _stream_wide_timeseries(
                             hourly_samples_p[b_idx].append(fin_vals)
 
             if keep_row_hourly:
-                mid_cols = [idxs[len(idxs) // 2] for idxs in bucket_indices]
-                sub_mid = np.round(mat[:, mid_cols], 2)
+                sub_tl = np.round(mat[:, tl_mid_cols], 2)
                 for idx_r, obj_id in enumerate(ids):
-                    arr_r = sub_mid[idx_r]
+                    arr_r = sub_tl[idx_r]
                     if np.isfinite(arr_r).any():
                         row_hourly[obj_id] = [None if np.isnan(float(v)) else round(float(v), 2) for v in arr_r]
 
@@ -314,7 +354,7 @@ def _stream_wide_timeseries(
             hourly_out = [round(float(x), 2) for x in hourly_sum]
         elif hourly_mode == "percentiles":
             p10, p50, p90 = [], [], []
-            for b_idx in range(n_buckets):
+            for b_idx in range(n_buckets_24):
                 if hourly_samples_p[b_idx]:
                     arr = np.concatenate(hourly_samples_p[b_idx])
                     p10.append(round(float(np.percentile(arr, 10)), 2))
@@ -331,7 +371,8 @@ def _stream_wide_timeseries(
         "valid_numeric": valid_numeric_any,
         "n_steps": n_steps,
         "step_names": step_cols,
-        "bucket_step_labels": bucket_step_labels,
+        "bucket_step_labels": [f"{h:02d}:00" for h in range(n_buckets_24)],
+        "timeline_labels": timeline_labels,
         "rows": row_stats,
         "hourly_24": hourly_out,
         "row_hourly": row_hourly,
@@ -458,9 +499,12 @@ def process_aquabit_city_v3(
     raw_city_dir: Path | str,
     inp_path: Path | str | None = None,
     top_k: int = 15,
+    timeline_buckets: int = 48,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Обновленный процессор ПК «Аквабит» v3: поддержка Клапан, Поток Клапан, Резервуар, Источник,
-    автопочинка топологии Начальный==Конечный узел, 100% заполнение узлов карты и таймлайна."""
+    """Процессор ПК «Аквабит» v3.2:
+    - Детальная временная шкала (48 шагов по 30 мин / ЧЧ:ММ без меток R360)
+    - Графовая причинно-следственная диагностика: Источник <-> Насос <-> Коллектор <-> Труба
+    - Полная выборка таблиц по категориям давлений и секторам скоростей потока."""
     t0 = time.perf_counter()
     raw_city_dir = Path(raw_city_dir)
     inp_path = Path(inp_path) if inp_path else None
@@ -529,6 +573,7 @@ def process_aquabit_city_v3(
             nid_s = str(nid).strip()
             if not math.isnan(float(zv)):
                 elev_map[nid_s] = float(zv)
+                elev_map[clean_object_id(nid_s)] = float(zv)
             if rv > 0:
                 req_p_map[nid_s] = float(rv)
                 floors_map[nid_s] = max(1, int(round(1.0 + max(0.0, float(rv) - 10.0) / 4.0)))
@@ -538,6 +583,7 @@ def process_aquabit_city_v3(
 
     # 1b. Источники и РЧВ
     sources_list: list[dict[str, Any]] = []
+    source_head_by_cid: dict[str, float] = {}
     if not df_src.empty:
         c_id = df_src.columns[0]
         c_h = find_col(df_src, "напор", default_idx=1 if len(df_src.columns) > 1 else None)
@@ -548,15 +594,18 @@ def process_aquabit_city_v3(
         ys = pd.to_numeric(df_src[c_y], errors="coerce") if c_y else pd.Series(np.nan, index=df_src.index)
         for sid, hv, xv, yv in zip(df_src[c_id], hs, xs, ys):
             sid_s = str(sid).strip()
+            s_cid = clean_object_id(sid_s)
             h_val = None if math.isnan(float(hv)) else round(float(hv), 2)
             if h_val is not None:
                 elev_map.setdefault(sid_s, h_val)
+                elev_map.setdefault(s_cid, h_val)
+                source_head_by_cid[s_cid] = h_val
             if not (math.isnan(float(xv)) or math.isnan(float(yv))):
                 csv_coords[sid_s] = [float(xv), float(yv)]
-                csv_coords[clean_object_id(sid_s)] = [float(xv), float(yv)]
+                csv_coords[s_cid] = [float(xv), float(yv)]
             sources_list.append({
                 "source_id": sid_s,
-                "clean_id": clean_object_id(sid_s),
+                "clean_id": s_cid,
                 "name": clean_object_name(obj_names.get(sid_s, "Источник водоснабжения")),
                 "design_head_m": h_val,
                 "x": None if math.isnan(float(xv)) else round(float(xv), 2),
@@ -574,15 +623,17 @@ def process_aquabit_city_v3(
         ys = pd.to_numeric(df_tanks[c_y], errors="coerce") if c_y else pd.Series(np.nan, index=df_tanks.index)
         for tid, hv, xv, yv in zip(df_tanks[c_id], hs, xs, ys):
             tid_s = str(tid).strip()
+            t_cid = clean_object_id(tid_s)
             h_val = None if math.isnan(float(hv)) else round(float(hv), 2)
             if h_val is not None:
                 elev_map.setdefault(tid_s, h_val)
+                elev_map.setdefault(t_cid, h_val)
             if not (math.isnan(float(xv)) or math.isnan(float(yv))):
                 csv_coords[tid_s] = [float(xv), float(yv)]
-                csv_coords[clean_object_id(tid_s)] = [float(xv), float(yv)]
+                csv_coords[t_cid] = [float(xv), float(yv)]
             tanks_list.append({
                 "tank_id": tid_s,
-                "clean_id": clean_object_id(tid_s),
+                "clean_id": t_cid,
                 "name": clean_object_name(obj_names.get(tid_s, "Резервуар чистой воды (РЧВ)")),
                 "design_head_m": h_val,
                 "x": None if math.isnan(float(xv)) else round(float(xv), 2),
@@ -607,7 +658,7 @@ def process_aquabit_city_v3(
 
     active_nodes = set(req_p_map.keys()) | set(base_demand.keys())
 
-    # 3. Временные ряды
+    # 3. Временные ряды с высокой детализацией для временной шкалы
     f_free = _resolve_file_ci(raw_city_dir, "Свободный напор Узел.csv")
     f_head = _resolve_file_ci(raw_city_dir, "Напор Узел.csv")
     head_ts = _stream_wide_timeseries(
@@ -616,11 +667,31 @@ def process_aquabit_city_v3(
         hourly_mode="percentiles",
         filter_ids=active_nodes or None,
         keep_row_hourly=True,
+        timeline_buckets=timeline_buckets,
     )
-    dem_ts = _stream_wide_timeseries(_resolve_file_ci(raw_city_dir, "Потребление Узел.csv"), hourly_mode="sum_positive")
-    pump_ts = _stream_wide_timeseries(_resolve_file_ci(raw_city_dir, "Поток Насос.csv"), hourly_mode="sum")
-    pipe_ts = _stream_wide_timeseries(_resolve_file_ci(raw_city_dir, "Поток Труба.csv"), hourly_mode="none")
-    valve_ts = _stream_wide_timeseries(_resolve_file_ci(raw_city_dir, "Поток Клапан.csv"), hourly_mode="sum", keep_row_hourly=True)
+    dem_ts = _stream_wide_timeseries(
+        _resolve_file_ci(raw_city_dir, "Потребление Узел.csv"),
+        hourly_mode="sum_positive",
+        timeline_buckets=timeline_buckets,
+    )
+    pump_ts = _stream_wide_timeseries(
+        _resolve_file_ci(raw_city_dir, "Поток Насос.csv"),
+        hourly_mode="sum",
+        keep_row_hourly=True,
+        timeline_buckets=timeline_buckets,
+    )
+    pipe_ts = _stream_wide_timeseries(
+        _resolve_file_ci(raw_city_dir, "Поток Труба.csv"),
+        hourly_mode="none",
+        keep_row_hourly=True,
+        timeline_buckets=timeline_buckets,
+    )
+    valve_ts = _stream_wide_timeseries(
+        _resolve_file_ci(raw_city_dir, "Поток Клапан.csv"),
+        hourly_mode="sum",
+        keep_row_hourly=True,
+        timeline_buckets=timeline_buckets,
+    )
 
     n_steps = head_ts["n_steps"] or dem_ts["n_steps"] or valve_ts["n_steps"] or 1440
     step_min = 1440.0 / max(n_steps, 1)
@@ -652,8 +723,9 @@ def process_aquabit_city_v3(
             if (pst is None or pst["max"] <= 1e-3) and (clean_object_id(sn_clean) in source_clean_ids or sn_clean in source_ids_set):
                 inactive_well_nodes.add(sn_clean)
 
-    # 5. Трубы
-    pipe_records = []
+    # 5. Трубы и индексация графа смежности узлов и участков
+    pipe_records: list[dict[str, Any]] = []
+    adj_pipes_by_node: dict[str, list[dict[str, Any]]] = {}
     velocity_bins = {
         "Перекрыты / Поток = 0 (задвижка)": 0,
         "Низкие скорости (< 0.10 м/с)": 0,
@@ -676,7 +748,7 @@ def process_aquabit_city_v3(
         c_c = find_col(df_pipes, "шероховат", default_idx=5 if len(df_pipes.columns) > 5 else None)
 
         ds = pd.to_numeric(df_pipes[c_d], errors="coerce").fillna(0.0) if c_d else pd.Series(0.0, index=df_pipes.index)
-        ls = pd.to_numeric(df_pipes[c_l], errors="coerce").fillna(0.0) if c_l else pd.Series(0.0, index=df_pipes.index)
+        ls = pd.to_numeric(df_pipes[c_l], errors="coerce").fillna(0.0) if c_l else pd.Series(np.nan, index=df_pipes.index)
         cs = pd.to_numeric(df_pipes[c_c], errors="coerce") if c_c else pd.Series(np.nan, index=df_pipes.index)
 
         for pid, sn, en, d_mm, l_m, c_hw in zip(
@@ -686,25 +758,28 @@ def process_aquabit_city_v3(
             ds, ls, cs,
         ):
             d_val = float(d_mm)
-            l_val = max(0.0, float(l_m))
+            l_val = max(0.0, float(l_m) if not math.isnan(float(l_m)) else 0.0)
             total_len_km += l_val / 1000.0
             c_val = None if math.isnan(float(c_hw)) else round(float(c_hw), 1)
             sn_s, en_s, had_bug = resolve_link_endpoints(pid, sn, en)
             if had_bug:
                 self_loop_pipes += 1
 
-            for u_node in (sn_s, en_s, clean_object_id(sn_s), clean_object_id(en_s)):
+            sn_cid = clean_object_id(sn_s)
+            en_cid = clean_object_id(en_s)
+            for u_node in (sn_s, en_s, sn_cid, en_cid):
                 if u_node:
                     node_degree[u_node] = node_degree.get(u_node, 0) + 1
 
             pst = pipe_ts["rows"].get(pid)
             v_max, q_max, headloss_m_km = None, None, None
             is_closed_pipe = (pid in inp_meta["closed_links"])
+            v_bin_name = "Не определен"
             if pst is not None and d_val > 0:
                 q_max = round(pst["abs_max"], 2)
                 if q_max <= 1e-4:
                     is_closed_pipe = True
-                for u_node in (sn_s, en_s, clean_object_id(sn_s), clean_object_id(en_s)):
+                for u_node in (sn_s, en_s, sn_cid, en_cid):
                     if u_node:
                         node_transit_flow[u_node] = node_transit_flow.get(u_node, 0.0) + q_max * 0.5
                 area = math.pi * ((d_val / 1000.0) ** 2) / 4.0
@@ -719,43 +794,64 @@ def process_aquabit_city_v3(
                     headloss_m_km = 0.0
 
                 if is_closed_pipe or v_max <= 0.001:
-                    velocity_bins["Перекрыты / Поток = 0 (задвижка)"] += 1
+                    v_bin_name = "Перекрыты / Поток = 0 (задвижка)"
                 elif v_max < 0.10:
-                    velocity_bins["Низкие скорости (< 0.10 м/с)"] += 1
+                    v_bin_name = "Низкие скорости (< 0.10 м/с)"
                 elif v_max < 0.50:
-                    velocity_bins["Умеренные (0.10–0.50 м/с)"] += 1
+                    v_bin_name = "Умеренные (0.10–0.50 м/с)"
                 elif v_max <= 1.50:
-                    velocity_bins["Оптимум (0.50–1.50 м/с)"] += 1
+                    v_bin_name = "Оптимум (0.50–1.50 м/с)"
                 elif v_max < 5.00:
-                    velocity_bins["Повышенные (1.50–5.00 м/с)"] += 1
+                    v_bin_name = "Повышенные (1.50–5.00 м/с)"
                 else:
-                    velocity_bins["Большая скорость (>= 5.00 м/с)"] += 1
+                    v_bin_name = "Большая скорость (>= 5.00 м/с)"
+                velocity_bins[v_bin_name] += 1
 
             cid = clean_object_id(pid)
             clean_nm = clean_object_name(obj_names.get(pid, ""))
-            pipe_records.append({
+
+            # Формируем конкретный инженерный вывод по участку без шаблонов
+            if is_closed_pipe:
+                pipe_diag = f"Поток Q = 0 м³/ч (перекрыт задвижкой между узлами #{sn_cid} и #{en_cid}). Проверить целесообразность открытия для кольцевания."
+            elif (headloss_m_km or 0) >= 15.0 or (v_max or 0) >= 5.0:
+                if c_val is not None and c_val < 70:
+                    pipe_diag = f"Критическое сопротивление (i={headloss_m_km} м/км) между узлами #{sn_cid} и #{en_cid} вызвано заниженным коэфф. шероховатости C={c_val} при D={round(d_val)} мм. В Аквабит: проверить C={c_val} или запланировать санацию/перекладку."
+                else:
+                    pipe_diag = f"Гидравлическое узкое место (i={headloss_m_km} м/км, V={v_max} м/с) на участке #{sn_cid} → #{en_cid}. Диаметр D={round(d_val)} мм недостаточен для пропуска {q_max} м³/ч; требуется дублирование или перекладка."
+            elif v_max is not None and v_max < 0.10:
+                pipe_diag = f"Малопроточная зона (V={v_max} м/с, Q={q_max} м³/ч) на ветке #{sn_cid}–#{en_cid} (D={round(d_val)} мм). Риск застоя воды."
+            else:
+                pipe_diag = f"Рабочий режим (V={v_max or 0} м/с, i={headloss_m_km or 0} м/км) между узлами #{sn_cid} и #{en_cid}."
+
+            p_rec = {
                 "pipe_id": pid,
                 "clean_id": cid,
                 "name": clean_nm,
                 "display_id": label_with_name(pid),
-                "start_node": sn_s,
-                "end_node": en_s,
+                "start_node": sn_cid or sn_s,
+                "end_node": en_cid or en_s,
                 "diameter_mm": round(d_val, 1),
                 "length_m": round(l_val, 1),
                 "hazen_williams_c": c_val,
                 "flow_max_m3_h": q_max,
                 "velocity_max_m_s": v_max,
                 "headloss_gradient_m_km": headloss_m_km,
+                "velocity_bin": v_bin_name,
                 "is_closed": is_closed_pipe,
                 "reverse_steps": pst["neg_steps"] if pst else 0,
-            })
+                "diagnostic_advice": pipe_diag,
+            }
+            pipe_records.append(p_rec)
+            for k_node in {sn_s, en_s, sn_cid, en_cid}:
+                if k_node:
+                    adj_pipes_by_node.setdefault(k_node, []).append(p_rec)
 
     if self_loop_pipes > 0:
         data_export_warnings.append(
             f"В Труба.csv обнаружено {self_loop_pipes} участков с ошибочным совпадением Начальный узел == Конечный узел (связи восстановлены из .inp)."
         )
 
-    # 6. Узлы (включая транзитные, источники и РЧВ)
+    # 6. Узлы (включая транзитные, источники и РЧВ) + привязка к смежным трубам
     node_records = []
     all_node_props: dict[str, dict[str, Any]] = {}
     pressure_bins = {
@@ -791,8 +887,40 @@ def process_aquabit_city_v3(
 
         deg = node_degree.get(nid, node_degree.get(cid, 1))
         tr_flow = round(node_transit_flow.get(nid, node_transit_flow.get(cid, 0.0)), 2)
+        conn_pipes = adj_pipes_by_node.get(cid) or adj_pipes_by_node.get(nid) or []
+        conn_pipe_ids = [p["clean_id"] for p in conn_pipes[:4]]
 
-        all_node_props[nid] = {
+        # Определяем категорию давления и точный инженерный диагноз узла с привязкой к подводящим трубам
+        p_category = "normal"
+        node_diag = "Нормативный гидравлический режим."
+        if p_min is not None:
+            if p_min < -3.0:
+                p_category = "data_error"
+                closed_nb = [p["clean_id"] for p in conn_pipes if p.get("is_closed")]
+                high_loss_nb = sorted(conn_pipes, key=lambda x: x.get("headloss_gradient_m_km") or 0, reverse=True)
+                if closed_nb:
+                    node_diag = f"Критический вакуум Pмин={p_min} м: узел отсечен закрытым участком #{closed_nb[0]} (Q=0) при активном отборе {round(q_mean, 2)} м³/ч. В Аквабит: открыть участок #{closed_nb[0]} или проверить отметку Z={elev_map.get(nid, '—')} м."
+                elif high_loss_nb and (high_loss_nb[0].get("headloss_gradient_m_km") or 0) >= 15.0:
+                    nb0 = high_loss_nb[0]
+                    node_diag = f"Критический вакуум Pмин={p_min} м из-за падения напора на подводящем участке #{nb0['clean_id']} (i={nb0['headloss_gradient_m_km']} м/км, D={nb0['diameter_mm']} мм) и отметки Z={elev_map.get(nid, '—')} м."
+                else:
+                    node_diag = f"Критический вакуум Pмин={p_min} м при Z={elev_map.get(nid, '—')} м (смежные участки: {', '.join('#'+x for x in conn_pipe_ids) or 'нет'}). Проверить корректность геодезической отметки Z и связность ветки в ПК «Аквабит»."
+            elif p_min < 0.0:
+                p_category = "negative"
+                node_diag = f"Субатмосферное давление Pмин={p_min} м при отметке Z={elev_map.get(nid, '—')} м (подводящие трубы: {', '.join('#'+x for x in conn_pipe_ids)})."
+            elif req_m > 0 and p_min < req_m:
+                p_category = "deficit"
+                high_loss_nb = sorted(conn_pipes, key=lambda x: x.get("headloss_gradient_m_km") or 0, reverse=True)
+                if high_loss_nb and (high_loss_nb[0].get("headloss_gradient_m_km") or 0) >= 10.0:
+                    nb0 = high_loss_nb[0]
+                    node_diag = f"Нехватка напора ΔP={margin_m} м ({floors_map.get(nid, 1)} эт., Pтреб={req_m} м): потери на подводящей трубе #{nb0['clean_id']} составляют {nb0['headloss_gradient_m_km']} м/км (D={nb0['diameter_mm']} мм)."
+                else:
+                    node_diag = f"Дефицит свободного напора ΔP={margin_m} м для {floors_map.get(nid, 1)}-эт. застройки (Z={elev_map.get(nid, '—')} м, трубы: {', '.join('#'+x for x in conn_pipe_ids)}). Требуется закольцовка или локальная ПНС."
+            elif p_max is not None and p_max > 60.0:
+                p_category = "excess"
+                node_diag = f"Избыточный напор Pмакс={p_max} м (>60 м по СП 31.13330.2021) при низкой отметке Z={elev_map.get(nid, '—')} м. Рекомендуется установка PRV на вводе (участки {', '.join('#'+x for x in conn_pipe_ids)})."
+
+        prop_obj = {
             "role": node_role,
             "z": round(elev_map[nid], 2) if nid in elev_map else None,
             "p_min": p_min,
@@ -804,9 +932,14 @@ def process_aquabit_city_v3(
             "demand": round(q_mean, 3),
             "transit_q": tr_flow,
             "connected_pipes": deg,
+            "connected_pipe_ids": conn_pipe_ids,
+            "pressure_category": p_category,
+            "diagnostic_advice": node_diag,
             "schedules": ", ".join(sorted(set(node_schedules.get(nid, [])))) or ("Транзит" if not is_active_consumer else "Базовый"),
             "name": clean_object_name(obj_names.get(nid, obj_names.get(cid, ""))),
         }
+        all_node_props[nid] = prop_obj
+        all_node_props[cid] = prop_obj
 
         if not is_active_consumer:
             continue
@@ -836,6 +969,9 @@ def process_aquabit_city_v3(
             "pressure_surplus_deficit_m": margin_m,
             "demand_mean_m3_h": round(q_mean, 3),
             "transit_flow_m3_h": tr_flow,
+            "pressure_category": p_category,
+            "connected_pipe_ids": conn_pipe_ids,
+            "diagnostic_advice": node_diag,
             "is_shutoff_well_or_zero_demand": is_shutoff_well,
         })
 
@@ -871,17 +1007,17 @@ def process_aquabit_city_v3(
         reverse=True,
     )
 
-    high_loss_pipes = sorted(
+    all_high_loss_pipes = sorted(
         [p for p in pipe_records if (p["velocity_max_m_s"] or 0) >= 5.0 or (p["headloss_gradient_m_km"] or 0) >= 15.0],
         key=lambda x: (x["headloss_gradient_m_km"] or 0),
         reverse=True,
     )
-    if not high_loss_pipes and pipe_records:
-        high_loss_pipes = sorted(
-            [p for p in pipe_records if (p["headloss_gradient_m_km"] or 0) > 0],
-            key=lambda x: (x["headloss_gradient_m_km"] or 0),
-            reverse=True,
-        )[:top_k]
+    bottleneck_pipes_total_count = len(all_high_loss_pipes)
+    high_loss_pipes = all_high_loss_pipes if all_high_loss_pipes else sorted(
+        [p for p in pipe_records if (p["headloss_gradient_m_km"] or 0) > 0],
+        key=lambda x: (x["headloss_gradient_m_km"] or 0),
+        reverse=True,
+    )[:top_k]
 
     low_c_pipes = sorted(
         [p for p in pipe_records if p["hazen_williams_c"] is not None and p["hazen_williams_c"] < 80.0 and (p["flow_max_m3_h"] or 0) > 1.0],
@@ -904,7 +1040,25 @@ def process_aquabit_city_v3(
         reverse=True,
     )
 
-    # 7. Насосы
+    # Формируем сбалансированную выборку труб для клиентской таблицы, чтобы каждый сектор круговой диаграммы скоростей имел данные для фильтрации
+    pipes_for_client_table: list[dict[str, Any]] = []
+    seen_p_ids: set[str] = set()
+    for p_list in (
+        all_high_loss_pipes[:80],
+        low_c_pipes[:40],
+        closed_pipes_list[:50],
+        [p for p in pipe_records if p.get("velocity_bin") == "Низкие скорости (< 0.10 м/с)"][:50],
+        [p for p in pipe_records if p.get("velocity_bin") == "Умеренные (0.10–0.50 м/с)"][:40],
+        [p for p in pipe_records if p.get("velocity_bin") == "Оптимум (0.50–1.50 м/с)"][:40],
+        [p for p in pipe_records if p.get("velocity_bin") == "Повышенные (1.50–5.00 м/с)"][:40],
+        [p for p in pipe_records if p.get("velocity_bin") == "Большая скорость (>= 5.00 м/с)"][:40],
+    ):
+        for pr in p_list:
+            if pr["pipe_id"] not in seen_p_ids:
+                seen_p_ids.add(pr["pipe_id"])
+                pipes_for_client_table.append(pr)
+
+    # 7. Насосы с графовой причинно-следственной диагностикой (Источник -> Насос -> Коллектор -> Труба)
     qh_raw: dict[str, list[tuple[float, float]]] = {}
     if not df_qh.empty and len(df_qh.columns) >= 3:
         for uid, qv, hv in zip(
@@ -935,6 +1089,7 @@ def process_aquabit_city_v3(
 
             sn_node, en_node = pump_endpoints.get(pid, ("", ""))
             sn_clean_num = clean_object_id(sn_node)
+            en_clean_num = clean_object_id(en_node)
             pid_clean_num = clean_object_id(pid)
 
             is_borehole = (
@@ -944,17 +1099,39 @@ def process_aquabit_city_v3(
             )
             pump_kind = "Скважинный (1-й подъем, от источника)" if is_borehole else "Сетевой / повысительный (НС)"
 
+            # Смежная топология вокруг насоса: входной узел/источник и выходной напорный коллектор + отходящие трубы
+            sn_props = all_node_props.get(sn_node) or all_node_props.get(sn_clean_num) or {}
+            en_props = all_node_props.get(en_node) or all_node_props.get(en_clean_num) or {}
+            src_head = source_head_by_cid.get(sn_clean_num) or sn_props.get("z")
+            col_z = en_props.get("z")
+            col_p_mean = en_props.get("p_mean") if en_props.get("p_mean") is not None else en_props.get("p_max")
+            col_p_max = en_props.get("p_max")
+            out_pipes = adj_pipes_by_node.get(en_clean_num) or adj_pipes_by_node.get(en_node) or []
+            out_pipes_sorted = sorted(out_pipes, key=lambda x: (x.get("headloss_gradient_m_km") or 0.0), reverse=True)
+            top_out_pipe = out_pipes_sorted[0] if out_pipes_sorted else None
+            closed_out_pipes = [p for p in out_pipes if p.get("is_closed")]
+
             pst = pump_ts["rows"].get(pid)
             is_active = bool(pst and pst["max"] > 1e-3)
             q_work, q_max_p, h_est, ratio, run_h = None, None, None, None, 0.0
 
             if not is_active:
                 zone_label = "Выключен / резерв (Q = 0)"
-                diag_advice = (
-                    "Скважинный насос отключен (поток 0). Входных задвижек нет — проверить уровень воды в скважине и напорную линию."
-                    if is_borehole else
-                    "Сетевой насос не выдает поток (Q = 0) — поток закрыт задвижкой или агрегат в резерве."
-                )
+                if closed_out_pipes:
+                    cp_id = closed_out_pipes[0]["clean_id"]
+                    diag_advice = (
+                        f"Подача Q = 0 м³/ч: за напорным узлом #{en_clean_num or '—'} перекрыт отходящий участок #{cp_id} (Q=0). "
+                        f"В ПК «Аквабит» откройте трубу #{cp_id} либо оставьте агрегат #{pid_clean_num} в резерве."
+                    )
+                elif col_p_max is not None and col_p_max > 10:
+                    diag_advice = (
+                        f"Агрегат #{pid_clean_num} находится в резерве (Q = 0 м³/ч). В приемном узле коллектора #{en_clean_num or '—'} "
+                        f"поддерживается напор P = {col_p_max} м от работающих насосов."
+                    )
+                else:
+                    diag_advice = (
+                        f"Агрегат #{pid_clean_num} отключен в расчете (Q = 0 м³/ч, резерв). Связь: узел #{sn_clean_num or '—'} → коллектор #{en_clean_num or '—'}."
+                    )
             else:
                 run_h = round(pst["pos_steps"] * step_min / 60.0, 2)
                 q_work = round(pst["mean"] * (max(pump_ts["n_steps"], 1) / max(pst["pos_steps"], 1)), 2)
@@ -965,23 +1142,67 @@ def process_aquabit_city_v3(
                     kw_hyd = (9.81 * q_work * h_est) / 3600.0
                     total_pump_energy_kwh_day += kw_hyd * run_h
                 ratio = round(q_work / q_nom, 2) if (q_nom and q_nom > 0) else None
+                pct_nom = int(round((ratio or 0) * 100))
+
                 if ratio is None:
                     zone_label = "Кривая Q-H не задана"
-                    diag_advice = "Паспортная кривая Q-H не привязана."
+                    diag_advice = f"Фактическая подача Q = {q_work} м³/ч в узел #{en_clean_num or '—'}, но паспортная кривая #{cid_s} не найдена в Кривая QH.csv."
                 elif ratio < 0.75:
                     zone_label = "Недогрузка (< 75% Q_ном)"
-                    diag_advice = (
-                        "Недогрузка скважинного насоса: проверять задвижки на входе некорректно (у скважины их нет). Проверить динамический уровень воды в скважине и противодавление коллектора."
-                        if is_borehole else
-                        "Недогрузка сетевого насоса (не выдает свой поток): проблема может быть в прикрытой задвижке или высоком сопротивлении сети."
-                    )
+                    # Однозначное определение причины по фактическим данным коллектора и отходящих труб
+                    col_p_disp = col_p_mean if col_p_mean is not None else "—"
+                    col_z_disp = col_z if col_z is not None else "—"
+                    src_h_disp = src_head if src_head is not None else "—"
+                    sn_p_disp = sn_props.get("p_mean") if sn_props.get("p_mean") is not None else "—"
+                    if top_out_pipe and (top_out_pipe.get("headloss_gradient_m_km") or 0) >= 15.0:
+                        tp_id = top_out_pipe["clean_id"]
+                        tp_i = top_out_pipe["headloss_gradient_m_km"]
+                        tp_d = top_out_pipe["diameter_mm"]
+                        tp_c = top_out_pipe["hazen_williams_c"]
+                        diag_advice = (
+                            f"Подача зажата до {q_work} м³/ч ({pct_nom}% от Qном={q_nom} м³/ч) из-за высокого сопротивления отходящего от коллектора #{en_clean_num} "
+                            f"водовода #{tp_id} (D={tp_d} мм, C={tp_c}, потери i={tp_i} м/км; давление в коллекторе #{en_clean_num} P={col_p_disp} м). "
+                            f"Мероприятие в Аквабит: увеличить диаметр/коэффициент C трубы #{tp_id} или перераспределить нагрузку."
+                        )
+                    elif closed_out_pipes:
+                        cp_id = closed_out_pipes[0]["clean_id"]
+                        diag_advice = (
+                            f"Подача ограничена до {q_work} м³/ч ({pct_nom}% Qном): в узле коллектора #{en_clean_num} (P={col_p_disp} м) "
+                            f"перекрыта смежная линия #{cp_id} (Q=0). Мероприятие в Аквабит: открыть участок #{cp_id} для разгрузки коллектора #{en_clean_num}."
+                        )
+                    elif is_borehole:
+                        if col_p_mean is not None and h_nom is not None and col_p_mean >= h_nom * 0.85:
+                            diag_advice = (
+                                f"Скважинный агрегат #{pid_clean_num} (источник #{sn_clean_num}, Hист={src_h_disp} м) выдает {q_work} м³/ч ({pct_nom}% Qном) "
+                                f"вследствие высокого противодавления P={col_p_mean} м в сборном коллекторе #{en_clean_num} (Z={col_z_disp} м). "
+                                f"Мероприятие: разгрузить сборный коллектор #{en_clean_num} или скорректировать кривую #{cid_s}."
+                            )
+                        else:
+                            diag_advice = (
+                                f"Скважинный агрегат #{pid_clean_num} развивает напор H={h_est} м при подаче {q_work} м³/ч ({pct_nom}% Qном) на подъеме от источника #{sn_clean_num} "
+                                f"(отметка/напор {src_h_disp} м) к узлу #{en_clean_num} (Z={col_z_disp} м, P={col_p_disp} м). "
+                                f"Мероприятие в Аквабит: проверить динамический уровень в источнике #{sn_clean_num} и соответствие кривой #{cid_s} геодезическому подъему."
+                            )
+                    else:
+                        diag_advice = (
+                            f"Сетевой насос #{pid_clean_num} выдает {q_work} м³/ч ({pct_nom}% от Qном={q_nom} м³/ч, H={h_est} м) на участке #{sn_clean_num} (Pвх={sn_p_disp} м) "
+                            f"→ #{en_clean_num} (Pвых={col_p_disp} м). Высокое противодавление после узла #{en_clean_num}; проверить пропускную способность отходящих линий."
+                        )
                 elif ratio <= 1.15:
+                    col_p_disp = col_p_mean if col_p_mean is not None else "—"
                     zone_label = "Оптимум BEP (75–115% Q_ном)"
-                    diag_advice = "Штатная работа в зоне оптимального КПД (BEP)."
-                else:
-                    zone_label = "Перегрузка (> 115% Q_ном)"
                     diag_advice = (
-                        "Перегрузка насоса: проблема ТОЧНО НЕ в задвижке. Проверить возможность уменьшения подачи за счет снижения давления на выходе (ЧРП, регулятор на выходе), а не за счет задвижек на входе или отключения в пик."
+                        f"Штатная работа в зоне BEP ({pct_nom}% Qном): подача Q={q_work} м³/ч, напор H={h_est} м "
+                        f"(узел входа #{sn_clean_num or '—'} → напорный узел #{en_clean_num or '—'}, Pвых={col_p_disp} м)."
+                    )
+                else:
+                    col_p_disp = col_p_mean if col_p_mean is not None else "—"
+                    zone_label = "Перегрузка (> 115% Q_ном)"
+                    tp_info = f" в водовод #{top_out_pipe['clean_id']} (D={top_out_pipe['diameter_mm']} мм)" if top_out_pipe else ""
+                    diag_advice = (
+                        f"Работа правее зоны BEP ({pct_nom}% Qном): расход вырос до Q={q_work} м³/ч (при Qном={q_nom} м³/ч) с просадкой напора до H={h_est} м "
+                        f"из-за низкого противодавления в приемном узле #{en_clean_num or '—'} (P={col_p_disp} м){tp_info}. "
+                        f"Мероприятие в Аквабит: снизить давление на выходе насоса #{pid_clean_num} (регулирование ЧРП или дросселирование после узла #{en_clean_num})."
                     )
 
             disp = label_with_name(pid)
@@ -994,8 +1215,13 @@ def process_aquabit_city_v3(
                 "display_id": disp,
                 "pump_type": pump_kind,
                 "is_borehole": is_borehole,
-                "start_node": clean_object_id(sn_node) or sn_node,
-                "end_node": clean_object_id(en_node) or en_node,
+                "start_node": sn_clean_num or sn_node,
+                "end_node": en_clean_num or en_node,
+                "source_head_m": src_head,
+                "collector_pressure_m": col_p_mean,
+                "collector_elevation_m": col_z,
+                "connected_out_pipe_id": top_out_pipe["clean_id"] if top_out_pipe else None,
+                "connected_out_pipe_loss": top_out_pipe["headloss_gradient_m_km"] if top_out_pipe else None,
                 "curve_id": cid_s,
                 "active": is_active,
                 "run_hours_day": run_h,
@@ -1021,9 +1247,18 @@ def process_aquabit_city_v3(
                     "active": is_active,
                     "is_borehole": is_borehole,
                     "pump_kind": pump_kind,
+                    "start_node": sn_clean_num or sn_node,
+                    "end_node": en_clean_num or en_node,
+                    "source_head_m": src_head,
+                    "collector_pressure_m": col_p_mean,
+                    "collector_elevation_m": col_z,
+                    "connected_out_pipe_id": top_out_pipe["clean_id"] if top_out_pipe else None,
+                    "connected_out_pipe_loss": top_out_pipe["headloss_gradient_m_km"] if top_out_pipe else None,
                     "operating_q_mean": q_work,
                     "operating_q_max": q_max_p,
                     "operating_h_est": h_est,
+                    "q_ratio": ratio,
+                    "regime": zone_label,
                     "diagnostic_advice": diag_advice,
                     **plot_info,
                 })
@@ -1119,7 +1354,7 @@ def process_aquabit_city_v3(
     if high_loss_pipes:
         top_p = high_loss_pipes[0]
         anomalies.append(
-            f"Лимитирующий участок {top_p['display_id']} (D={top_p['diameter_mm']} мм, C={top_p['hazen_williams_c']}): скорость {top_p['velocity_max_m_s']} м/с создаёт удельную потерю напора {top_p['headloss_gradient_m_km']} м/км."
+            f"Лимитирующий участок {top_p['display_id']} (узлы {top_p['start_node']} → {top_p['end_node']}, D={top_p['diameter_mm']} мм, C={top_p['hazen_williams_c']}): скорость {top_p['velocity_max_m_s']} м/с создаёт удельную потерю напора {top_p['headloss_gradient_m_km']} м/км."
         )
 
     p_mins_all = [r["free_pressure_min_m"] for r in node_records if r["free_pressure_min_m"] is not None]
@@ -1167,8 +1402,8 @@ def process_aquabit_city_v3(
             "excess_over_60m_count": len(excess_nodes),
             "worst_deficit_nodes": real_deficit_nodes[:top_k],
             "all_deficit_nodes": real_deficit_nodes[:250],
-            "worst_data_error_nodes": data_error_nodes[:25],
-            "top_excess_nodes": excess_nodes[:15],
+            "worst_data_error_nodes": data_error_nodes[:50],
+            "top_excess_nodes": excess_nodes[:50],
         },
         "pipes_analysis": {
             "pipes_count": len(pipe_records),
@@ -1180,16 +1415,19 @@ def process_aquabit_city_v3(
             "max_velocity_m_s": max_v,
             "high_velocity_over_15ms_count": v_over_15,
             "low_velocity_under_03ms_count": v_under_03,
+            "bottleneck_pipes_count": bottleneck_pipes_total_count,
             "closed_zero_flow_pipes_count": len(closed_pipes_list),
-            "closed_pipes_sample": closed_pipes_list[:20],
+            "closed_pipes_sample": closed_pipes_list[:50],
             "reverse_flow_count": rev_cnt,
-            "reverse_flow_pipes": reverse_flow_pipes[:15],
+            "reverse_flow_pipes": reverse_flow_pipes[:25],
             "velocity_bins": velocity_bins,
             "high_velocity_over_5ms_count": velocity_bins["Большая скорость (>= 5.00 м/с)"],
             "low_velocity_under_01ms_count": velocity_bins["Низкие скорости (< 0.10 м/с)"],
             "top_high_loss_pipes": high_loss_pipes[:top_k],
+            "all_high_loss_pipes": all_high_loss_pipes[:80],
             "top_low_hazen_williams_c_pipes": low_c_pipes[:top_k],
             "degraded_high_loss_pipes": degraded_high_loss_pipes[:top_k],
+            "table_pipes_records": pipes_for_client_table,
         },
         "pumps_analysis": {
             "total_pumps": len(all_pumps_list),
@@ -1255,6 +1493,10 @@ def process_aquabit_city_v3(
             "v": p.get("velocity_max_m_s"),
             "i": p.get("headloss_gradient_m_km"),
             "q": p.get("flow_max_m3_h"),
+            "sn": p.get("start_node"),
+            "en": p.get("end_node"),
+            "v_bin": p.get("velocity_bin"),
+            "advice": p.get("diagnostic_advice"),
             "closed": p.get("is_closed"),
             "name": p.get("name"),
         }
@@ -1268,16 +1510,20 @@ def process_aquabit_city_v3(
     dem_is_dynamic = bool(len(dem_24) >= 2 and max(dem_24, default=0) > 0)
     pmp_is_dynamic = bool(len(pmp_24) >= 2 and max(pmp_24, default=0) > 0)
 
+    tl_labels = head_ts.get("timeline_labels") or [f"{h:02d}:00" for h in range(24)]
+
     chart_payload = {
         "city_name": city_name,
-        "hours_labels": [f"{h:02d}:00 ({lbl})" for h, lbl in enumerate(head_ts.get("bucket_step_labels") or [f"R{h}" for h in range(24)])],
-        "step_labels": head_ts.get("bucket_step_labels") or [f"R{h}" for h in range(24)],
+        "hours_labels": tl_labels,
+        "step_labels": [f"{h:02d}:00" for h in range(24)],
         "diurnal_demand_m3_h": dem_ts["hourly_24"],
         "diurnal_pump_flow_m3_h": pump_ts["hourly_24"],
         "diurnal_valve_flow_m3_h": valve_ts["hourly_24"],
         "valves_hourly_series": valves_hourly_series,
         "diurnal_free_pressure_percentiles_m": head_ts["hourly_24"],
         "node_hourly_pressures": head_ts.get("row_hourly", {}),
+        "pipe_hourly_flows": pipe_ts.get("row_hourly", {}),
+        "pump_hourly_flows": pump_ts.get("row_hourly", {}),
         "deficit_nodes_points": [
             {
                 "node_id": r["node_id"],
@@ -1288,6 +1534,7 @@ def process_aquabit_city_v3(
                 "dp": r["pressure_surplus_deficit_m"],
                 "floors": r["floors"],
                 "q": r["demand_mean_m3_h"],
+                "advice": r.get("diagnostic_advice", ""),
             }
             for r in real_deficit_nodes[:250]
         ],
@@ -1295,15 +1542,19 @@ def process_aquabit_city_v3(
             {
                 "pipe_id": p["pipe_id"],
                 "clean_id": p["clean_id"],
+                "sn": p["start_node"],
+                "en": p["end_node"],
                 "d": p["diameter_mm"],
                 "l": p["length_m"],
                 "v": p["velocity_max_m_s"],
                 "i": p["headloss_gradient_m_km"],
                 "c": p["hazen_williams_c"],
                 "q": p["flow_max_m3_h"],
+                "advice": p.get("diagnostic_advice", ""),
             }
-            for p in high_loss_pipes[:60]
+            for p in (all_high_loss_pipes[:80] if all_high_loss_pipes else high_loss_pipes[:60])
         ],
+        "bottleneck_pipes_total_count": bottleneck_pipes_total_count,
         "qh_curves": qh_chart_items,
         "pressure_bins": pressure_bins,
         "velocity_bins": velocity_bins,
@@ -1338,5 +1589,3 @@ def process_aquabit_city_fast(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Алиас обратной совместимости для __init__.py (делегирует в process_aquabit_city_v3)."""
     return process_aquabit_city_v3(raw_city_dir=raw_city_dir, inp_path=inp_path, top_k=top_k)
-
-# process_aquabit_city_fast = process_aquabit_city_v3

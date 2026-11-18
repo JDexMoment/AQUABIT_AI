@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-"""EPANET-AI v3 Interactive HTML Report Generator with Crosshair Projections,
-Verifiable Anomaly Highlighting, Dynamic AI Layout, Valve Dashboards & Map Timeline."""
+"""EPANET-AI v3.2 Interactive HTML Report Generator:
+- Table Sorting & Multi-Preset Filtering (linked to Warnings, AI Report, Charts & Pie Sectors)
+- Graph -> Table -> Map Interactive Chain
+- Fixed Center-Anchored Map Zoom (No Grey Screen) + Pulsing Selected Object Animation
+- High-Resolution HH:MM Timeline (without R360) with Live Selected Object Value Updates
+- On-Demand Context-Aware AI Analysis with Live Streaming / Typewriter Effect & Custom Q&A."""
 
 import datetime as dt
 import html
@@ -10,14 +14,24 @@ import re
 from pathlib import Path
 from typing import Any
 
-from aquabit_ai.ontology_engine import (
-    clean_object_id,
-    clean_object_name,
-    load_hydraulic_ontology,
-    evaluate_ontology_rules,
-    analyze_problem_domains,
-    extract_ai_dashboards_and_content,
-)
+try:
+    from aquabit_ai.ontology_engine import (
+        clean_object_id,
+        clean_object_name,
+        load_hydraulic_ontology,
+        evaluate_ontology_rules,
+        analyze_problem_domains,
+        extract_ai_dashboards_and_content,
+    )
+except ImportError:
+    from ontology_engine import (
+        clean_object_id,
+        clean_object_name,
+        load_hydraulic_ontology,
+        evaluate_ontology_rules,
+        analyze_problem_domains,
+        extract_ai_dashboards_and_content,
+    )
 
 
 def generate_reference_pure_facts_report(
@@ -26,8 +40,8 @@ def generate_reference_pure_facts_report(
     ontology: dict[str, Any] | None = None,
     ontology_path: str | Path | None = None,
 ) -> str:
-    """Формирует концептуальный ИИ-отчет: меньше сырых чисел, больше общей картины города,
-    описания графиков/таблиц, разбора ярких аномалий и инженерных мероприятий."""
+    """Формирует точный инженерный ИИ-отчет на основе графа смежности (Источник -> Насос -> Коллектор -> Труба)
+    без шаблонных оговорок, с интерактивными ссылками на объекты и автофильтрами таблиц."""
     cname = facts.get("city_name", "Сеть")
     pa = facts.get("pressure_analysis", {})
     ppa = facts.get("pipes_analysis", {})
@@ -53,11 +67,11 @@ def generate_reference_pure_facts_report(
 
     lines = ["# ИИ отчет"]
     lines.append(
-        f"Комплексная диагностика расчетной схемы водоснабжения города «{cname}» выявила выраженную структурную неоднородность гидравлического режима. "
-        f"Транспортировка воды по сети протяженностью {tot_km:,.1f} км ({p_cnt:,} участков) при суточном водопотреблении {cons_m3:,.0f} м³/сут "
-        f"сопровождается локальными перепадами пьезометрического напора между зоной генерации (источниками: {src_cnt} шт., РЧВ: {tanks_cnt} шт., "
-        f"насосными агрегатами: {tot_pumps} шт., из которых скважинных 1-го подъема — {bh_tot} шт.) и периферийными кварталами абонентской застройки. "
-        f"Ниже структура отчета и порядок дашбордов автоматически ранжированы ИИ по правилам TTL-онтологии для города «{cname}»."
+        f"Комплексный аудит гидравлической модели города «{cname}» выполнен с трассировкой причинно-следственных связей "
+        f"по цепочкам «Источник → Насосный агрегат → Напорный узел коллектора → Лимитирующий водовод → Абонентский узел». "
+        f"Протяженность сети составляет {tot_km:,.1f} км ({p_cnt:,} участков), суточное водопотребление — {cons_m3:,.0f} м³/сут "
+        f"(источников: {src_cnt} шт., РЧВ: {tanks_cnt} шт., насосов: {tot_pumps} шт., в т.ч. скважинных 1-го подъема — {bh_tot} шт.). "
+        f"Нажмите на любой ID объекта для центрирования на карте или на ссылку фильтра для автоматической выборки и сортировки в таблице."
     )
 
     section_order = []
@@ -72,30 +86,37 @@ def generate_reference_pure_facts_report(
             def_cnt = pa.get("real_required_pressure_deficit_count", 0)
             err_cnt = pa.get("data_error_below_minus_3m_count", 0)
             exc_cnt = pa.get("excess_over_60m_count", 0)
-            lines.append(f"\n## Приоритет {idx} - Обеспеченность этажности застройки свободным напором и анализ зоны депрессии")
+            lines.append(f"\n## Приоритет {idx} - Обеспеченность этажности застройки свободным напором и локализация зон депрессии")
             if def_cnt > 0 and top_id:
+                nb_pipes = ", ".join(f"`{pid}`" for pid in (top_d.get("connected_pipe_ids") or [])[:3]) or "распределительной сети"
                 lines.append(
-                    f"- **Общая картина по городу и связь с графиком дефицитов:** На графике распределения свободного напора и в реестре абонентов выделяется кластер из {def_cnt} абонентских узлов, "
-                    f"в которых фактический свободный напор проседает ниже нормативной потребности здания. Самая яркая аномалия зафиксирована в лимитирующем узле `{top_id}`, "
-                    f"где нехватка давления составляет ΔP = {top_val:.1f} м (при требуемом напоре {top_d.get('required_pressure_m', 10):.1f} м для {top_d.get('floors', 1)}-этажной застройки)."
+                    f"- **Локализация дефицита свободного напора:** В расчетной схеме выявлено **{def_cnt} абонентских узлов** с фактическим напором ниже требуемого по этажности "
+                    f"([Отфильтровать и отсортировать все {def_cnt} узлов с дефицитом в таблице](filter:nodes:deficit)). "
+                    f"Максимальная нехватка зафиксирована в диктующем узле `{top_id}` (отметка Z = {top_d.get('elevation_m', '—')} м, {top_d.get('floors', 1)} эт., Pтреб = {top_d.get('required_pressure_m', 10):.1f} м): "
+                    f"дефицит составляет **ΔP = {top_val:.1f} м** на смежных участках {nb_pipes}."
                 )
             if err_cnt > 0:
                 w_err = pa.get("worst_data_error_nodes", [{}])[0]
                 err_id = clean_object_id(w_err.get("node_id", ""))
+                err_pipes = ", ".join(f"`{pid}`" for pid in (w_err.get("connected_pipe_ids") or [])[:3])
                 lines.append(
-                    f"- **Критическое отрицательное давление (< -3.0 м, правило R02):** Зафиксировано {err_cnt} активных узлов с вакуумом ниже -3.0 м (наиболее глубокая просадка в узле `{err_id}`: {w_err.get('free_pressure_min_m', 0):.1f} м). "
-                    "Необходимо проверить отметку земли Z и связность ветки (отсутствие отсечения закрытой задвижкой)."
+                    f"- **Критический вакуум (< -3.0 м, правило R02):** Обнаружено **{err_cnt} активных узлов** с давлением ниже -3.0 м "
+                    f"([Показать и отсортировать {err_cnt} узлов с P < -3.0 м в таблице](filter:nodes:data_error)). "
+                    f"Экстремальное значение в узле `{err_id}` (Pмин = {w_err.get('free_pressure_min_m', 0):.1f} м, Z = {w_err.get('elevation_m', '—')} м"
+                    + (f", смежные трубы: {err_pipes}" if err_pipes else "")
+                    + f"): {w_err.get('diagnostic_advice', 'проверить отметку Z и открытость подводящих труб')}."
                 )
             if exc_cnt > 0:
                 w_exc = pa.get("top_excess_nodes", [{}])[0]
                 exc_id = clean_object_id(w_exc.get("node_id", ""))
                 lines.append(
-                    f"- **Зона избыточного напора (> 60 м по СП 31.13330.2021, правило R16):** Выявлено {exc_cnt} узлов с давлением выше 60 м (пик в узле `{exc_id}`: {w_exc.get('free_pressure_max_m', 0):.1f} м), что требует зонирования редукционными клапанами PRV."
+                    f"- **Зона избыточного напора (> 60 м по СП 31.13330.2021):** Зафиксировано **{exc_cnt} узлов** с превышением 60 м "
+                    f"([Отфильтровать {exc_cnt} узлов с P > 60 м](filter:nodes:excess)), максимум в узле `{exc_id}` (Pмакс = {w_exc.get('free_pressure_max_m', 0):.1f} м при Z = {w_exc.get('elevation_m', '—')} м)."
                 )
             if top_id:
                 lines.append(
-                    f"- **Причина возникновения и инженерное решение:** Просадка пьезометра вокруг узла `{top_id}` обусловлена наложением высокого геодезического рельефа и потерь напора в распределительных линиях. "
-                    "Для устранения дефицита необходимо перераспределить напор через закольцовку подводящих линий либо предусмотреть локальное бустерное повышение давления (ПНС) на вводе в квартал."
+                    f"- **Инженерные мероприятия и действия в ПК «Аквабит»:** (1) На сети: закольцевать подводящую линию к кварталу узла `{top_id}` или установить локальную ПНС; в низинной зоне около `{exc_id if exc_cnt else top_id}` установить регулятор давления PRV. "
+                    f"(2) В ПК «Аквабит»: проверить геодезическую отметку Z в `Узел.csv` для узлов с вакуумом (`{err_id if err_cnt else top_id}`) и статус секущих задвижек на подводящих трубах."
                 )
 
         elif dom == "pump_imbalance":
@@ -104,58 +125,67 @@ def generate_reference_pure_facts_report(
             over = pma.get("overloaded_pumps", [])
             bh_under = [p for p in under if p.get("is_borehole")]
             boost_under = [p for p in under if not p.get("is_borehole")]
-            lines.append(f"\n## Приоритет {idx} - Диагностика скважинных и сетевых насосов и разрыв мощности с расходом сети")
+            lines.append(f"\n## Приоритет {idx} - Причинно-следственная диагностика насосов, скважин и напорных коллекторов")
             lines.append(
-                f"- **Баланс установленной мощности и расхода сети:** Сопоставление установленной мощности насосного парка ({inst_q:,.1f} м³/ч) с реальным пиковым расходом сети ({peak_q:,.1f} м³/ч) "
-                f"показывает разрыв в {abs(inst_q - peak_q):,.1f} м³/ч. На графике кривых Q-H насосы разделены на **скважинные агрегаты 1-го подъема** ({bh_tot} шт., начальный узел является Источником) и **сетевые насосы НС**."
+                f"- **Баланс установленной мощности и расхода сети:** Суммарная номинальная подача насосов составляет {inst_q:,.1f} м³/ч при пиковом потреблении сети {peak_q:,.1f} м³/ч "
+                f"(скважинных агрегатов 1-го подъема — {bh_tot} шт., в недогрузке — {len(under)} шт. ([Показать в таблице](filter:pumps:underload)), "
+                f"в перегрузке — {len(over)} шт. ([Показать в таблице](filter:pumps:overload)))."
             )
             if bh_under:
-                p0 = clean_object_id(bh_under[0].get("pump_id"))
+                p0 = bh_under[0]
+                p0_id = clean_object_id(p0.get("pump_id"))
+                sn_id = p0.get("start_node") or "—"
+                en_id = p0.get("end_node") or "—"
+                out_p = p0.get("connected_out_pipe_id")
                 lines.append(
-                    f"- **Аномалия недогрузки скважинных насосов (на примере насоса `{p0}`):** Насосы в недогрузке не могут выдать свой расчетный поток в сеть. "
-                    f"Поскольку агрегат `{p0}` является **скважинным** (его начальный узел — Источник), **у него физически нет задвижек на входе**, и проверять входную арматуру некорректно. "
-                    "Ограничение подачи вызвано снижением динамического уровня воды в скважине либо завышенным противодавлением в сборном напорном коллекторе."
+                    f"- **Разбор недогрузки скважинного агрегата `{p0_id}` (источник `{sn_id}` → коллектор `{en_id}`):** "
+                    f"{p0.get('diagnostic_advice', '')} "
+                    + (f"Связанный отходящий участок коллектора: `{out_p}` (потери {p0.get('connected_out_pipe_loss', 0)} м/км)." if out_p else "")
                 )
             if boost_under:
-                p_b = clean_object_id(boost_under[0].get("pump_id"))
+                pb = boost_under[0]
+                pb_id = clean_object_id(pb.get("pump_id"))
                 lines.append(
-                    f"- **Аномалия недогрузки сетевых насосов (на примере насоса `{p_b}`):** Сетевой агрегат `{p_b}` работает левее оптимальной зоны BEP и не выдает свой поток — "
-                    "здесь проблема вероятнее всего кроется в прикрытой задвижке на линии насоса или гидравлическом зажатии напорного узла."
+                    f"- **Разбор недогрузки сетевого насоса `{pb_id}` (вход `{pb.get('start_node', '—')}` → напорный узел `{pb.get('end_node', '—')}`):** "
+                    f"{pb.get('diagnostic_advice', '')}"
                 )
             if over:
-                p_o = clean_object_id(over[0].get("pump_id"))
+                po = over[0]
+                po_id = clean_object_id(po.get("pump_id"))
                 lines.append(
-                    f"- **Аномалия перегрузки насосов (на примере насоса `{p_o}`):** Агрегат `{p_o}` смещен правее зоны BEP (> 115% номинала). "
-                    "При перегрузке проблема **точно не в задвижке**. Для нормализации режима необходимо проверить возможность уменьшения подачи насоса за счет **уменьшения давления на выходе** "
-                    "(корректировка уставки ЧРП или регулирование давления на нагнетании), а не за счет манипуляций с задвижками на входе или отключения насоса в час пик."
+                    f"- **Разбор перегрузки агрегата `{po_id}` (напорный узел `{po.get('end_node', '—')}`):** "
+                    f"{po.get('diagnostic_advice', '')}"
                 )
 
         elif dom == "hydraulic_bottlenecks":
             section_order.append("bottlenecksSection")
             high_loss = ppa.get("top_high_loss_pipes", [])
+            bneck_cnt = ppa.get("bottleneck_pipes_count") or len(high_loss)
             w_p = high_loss[0] if high_loss else {}
             w_id = clean_object_id(w_p.get("pipe_id", ""))
-            lines.append(f"\n## Приоритет {idx} - Гидравлические узкие места и аномалии удельных потерь напора")
+            sn_id = w_p.get("start_node", "—")
+            en_id = w_p.get("end_node", "—")
+            lines.append(f"\n## Приоритет {idx} - Гидравлические узкие места и потери напора ({bneck_cnt} участков)")
             lines.append(
-                f"- **Интерпретация графика узких мест:** На диаграмме удельных потерь напора выделяется лимитирующий участок `{w_id}` "
-                f"(диаметр D={w_p.get('diameter_mm', 0):.0f} мм, C={w_p.get('hazen_williams_c', 100)}), где потери достигают {w_p.get('headloss_gradient_m_km', 0):.1f} м/км при скорости {w_p.get('velocity_max_m_s', 0):.2f} м/с. "
-                "Именно такие локальные дроссели поглощают полезный напор насосных станций на пути к жилым кварталам."
+                f"- **Локализация лимитирующих водоводов:** В сети выявлено **{bneck_cnt} участков** с повышенным градиентом потерь напора "
+                f"([Отфильтровать узкие места в таблице труб](filter:pipes:bottlenecks)). "
+                f"Лимитирующий участок `{w_id}` между узлами `{sn_id}` и `{en_id}` (D = {w_p.get('diameter_mm', 0):.0f} мм, шероховатость C = {w_p.get('hazen_williams_c', 100)}) "
+                f"создает удельные потери **{w_p.get('headloss_gradient_m_km', 0):.1f} м/км** при скорости потока {w_p.get('velocity_max_m_s', 0):.2f} м/с."
             )
             lines.append(
-                f"- **Инженерные мероприятия:** Выполнить перекладку или санацию участка `{w_id}` с увеличением внутреннего диаметра либо перераспределить поток по параллельной закольцованной ветке."
+                f"- **Инженерные мероприятия и действия в ПК «Аквабит»:** В модели ПК «Аквабит» проверить корректность коэффициента Хейзена-Уильямса C = {w_p.get('hazen_williams_c', 100)} на участке `{w_id}` (в `Труба.csv`); "
+                f"на сети — выполнить санацию/перекладку линии `{sn_id}` → `{en_id}` или переключить часть расхода на параллельную ветку."
             )
 
         elif dom == "water_stagnation":
             section_order.append("stagnationSection")
             stag_cnt = ppa.get("low_velocity_under_01ms_count", 0)
             closed_cnt = ppa.get("closed_zero_flow_pipes_count", 0)
-            lines.append(f"\n## Приоритет {idx} - Структура скоростного режима, закрытые задвижками участки и застойные зоны")
+            lines.append(f"\n## Приоритет {idx} - Скоростной режим сети, перекрытые участки и малопроточные зоны")
             lines.append(
-                f"- **Анализ круговой диаграммы скоростей:** Круговая диаграмма показывает, что помимо оптимального транзитного ядра в сети присутствуют {closed_cnt} участков с полностью нулевым потоком (Q = 0) "
-                f"и {stag_cnt} малопроточных участков со скоростью 0 < V < 0.10 м/с. Если в трубе поток не идет (Q = 0), значит участок перекрыт секущей задвижкой."
-            )
-            lines.append(
-                "- **Инженерные мероприятия:** Провести ревизию запорной арматуры на перекрытых участках для восстановления кольцевого движения воды и устранить тупиковые зоны с риском вторичного ухудшения качества воды."
+                f"- **Структура скоростей потока:** Выявлено **{closed_cnt} перекрытых участков** с нулевым расходом Q = 0 ([Показать перекрытые трубы в таблице](filter:pipes:closed)) "
+                f"и **{stag_cnt} малопроточных участков** со скоростью V < 0.10 м/с ([Отфильтровать малопроточные участки](filter:pipes:stagnant)). "
+                f"Кликните по любому сектору круговой диаграммы скоростей для мгновенной фильтрации соответствующей группы труб в таблице."
             )
 
         elif dom == "valves_and_storage":
@@ -165,17 +195,17 @@ def generate_reference_pure_facts_report(
             v_id = top_v.get("clean_id", "")
             lines.append(f"\n## Приоритет {idx} - Режим работы регулирующих клапанов (PRV/PSV), источников и РЧВ")
             lines.append(
-                f"- **Динамика регулирующей арматуры и емкостей:** В расчетной схеме задействовано {valves_cnt} клапанов, {src_cnt} источников и {tanks_cnt} резервуаров РЧВ. "
-                + (f"На графике потоков через клапаны наиболее интенсивный режим регулирования демонстрирует клапан `{v_id}` (тип {top_v.get('type_code')}, настройка {top_v.get('setting')}), пропускающий от {top_v.get('flow_min_m3_h')} до {top_v.get('flow_max_m3_h')} м³/ч. " if v_id else "")
-                + "Согласованная настройка уставок клапанов PRV и уровней РЧВ позволяет стабилизировать давление в диктующих точках без перегрузки насосных станций."
+                f"- **Баланс регулирующей арматуры и емкостей:** В расчетной схеме задействовано {valves_cnt} клапанов, {src_cnt} источников и {tanks_cnt} резервуаров РЧВ. "
+                + (f"Клапан `{v_id}` ({top_v.get('type_code')}, уставка {top_v.get('setting')}) на участке `{top_v.get('start_node')}` → `{top_v.get('end_node')}` работает в диапазоне расходов от {top_v.get('flow_min_m3_h')} до {top_v.get('flow_max_m3_h')} м³/ч. " if v_id else "")
+                + "Согласование уровней РЧВ и уставок редукционных клапанов стабилизирует напор в диктующих точках сети."
             )
 
         elif dom == "diurnal_imbalance":
             section_order.append("diurnalSection")
-            lines.append(f"\n## Приоритет {idx} - Суточная динамика подачи и аккумулирующая способность сети")
+            lines.append(f"\n## Приоритет {idx} - Суточный баланс подачи насосных станций и водопотребления сети")
             lines.append(
-                "- **Согласование графиков подачи и потребления:** График суточного баланса отражает соотношение между подачей насосных станций и фактическим отбором абонентов по часам суток. "
-                "Сглаживание пиковых нагрузок должно обеспечиваться регулирующим объемом РЧВ и плавным частотным регулированием напорных агрегатов."
+                f"- **Согласование подачи и потребления (24 ч):** Пиковый часовой отбор абонентов составляет {peak_q:,.1f} м³/ч при коэффициенте часовой неравномерности Kчас = {wb.get('peak_factor_k_hour', 1.0)}. "
+                "На графике суточного баланса сопоставлены кривые суммарной подачи насосов и фактического водопотребления абонентов."
             )
 
     lines.append("\n[SELECTED_DASHBOARDS]")
@@ -201,6 +231,18 @@ def _markdown_to_clean_html(md: str) -> str:
             out.append("</ol>")
             in_ol = False
 
+    def format_inline(text_line: str) -> str:
+        s_escaped = html.escape(text_line)
+        # Поддержка ссылок автофильтрации таблиц: [Текст](filter:nodes:data_error)
+        s_escaped = re.sub(
+            r"\[([^\]]+)\]\(filter:([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\)",
+            r'<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI(\'\2\', \'\3\')" title="Применить фильтр и сортировку в таблице">\1 ↗</button>',
+            s_escaped,
+        )
+        s_escaped = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", s_escaped)
+        s_escaped = re.sub(r"`(.*?)`", r"<code>\1</code>", s_escaped)
+        return s_escaped
+
     for line in lines:
         s = line.strip()
         if not s:
@@ -220,23 +262,17 @@ def _markdown_to_clean_html(md: str) -> str:
                 close_lists()
                 out.append("<ul>")
                 in_ul = True
-            content = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", s[2:].strip())
-            content = re.sub(r"`(.*?)`", r"<code>\1</code>", content)
-            out.append(f"<li>{content}</li>")
+            out.append(f"<li>{format_inline(s[2:].strip())}</li>")
         elif re.match(r"^\d+\.\s", s):
             if not in_ol:
                 close_lists()
                 out.append("<ol>")
                 in_ol = True
             content = re.sub(r"^\d+\.\s*", "", s).strip()
-            content = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", content)
-            content = re.sub(r"`(.*?)`", r"<code>\1</code>", content)
-            out.append(f"<li>{content}</li>")
+            out.append(f"<li>{format_inline(content)}</li>")
         else:
             close_lists()
-            content = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", s)
-            content = re.sub(r"`(.*?)`", r"<code>\1</code>", content)
-            out.append(f"<p>{content}</p>")
+            out.append(f"<p>{format_inline(s)}</p>")
 
     close_lists()
     raw_html = "\n".join(out)
@@ -244,7 +280,7 @@ def _markdown_to_clean_html(md: str) -> str:
     def repl_id(m):
         raw = m.group(1)
         clean = clean_object_id(raw)
-        return f'<button type="button" class="object-link" data-map-id="{raw}" title="Показать на графике и карте">{clean}</button>'
+        return f'<button type="button" class="object-link" data-map-id="{raw}" title="Найти в таблице и подсветить на карте">{clean}</button>'
 
     raw_html = re.sub(r"<code>([ceputvk]?\d+)</code>", repl_id, raw_html, flags=re.IGNORECASE)
     return raw_html
@@ -286,9 +322,10 @@ def render_standalone_html_report(
     tanks_table = vra.get("tanks_table", [])
 
     raw_table_nodes = (
-        (pa.get("all_deficit_nodes") or pa.get("worst_deficit_nodes", []))
-        + pa.get("worst_data_error_nodes", [])
+        pa.get("worst_data_error_nodes", [])
+        + (pa.get("all_deficit_nodes") or pa.get("worst_deficit_nodes", []))
         + pa.get("top_excess_nodes", [])
+        + pa.get("shutoff_wells_nodes", [])
     )
     seen_node_ids: set[str] = set()
     dedup_nodes = []
@@ -296,38 +333,99 @@ def render_standalone_html_report(
         nid = str(r.get("node_id") or "")
         if nid and nid not in seen_node_ids:
             seen_node_ids.add(nid)
-            dedup_nodes.append(r)
-
-    client_tables = {
-        "nodes": [
-            {
+            p_min_v = r.get("free_pressure_min_m")
+            p_max_v = r.get("free_pressure_max_m")
+            dp_v = r.get("pressure_surplus_deficit_m", r.get("margin_min_m"))
+            p_cat = r.get("pressure_category")
+            if not p_cat:
+                if isinstance(p_min_v, (int, float)) and p_min_v < -3.0:
+                    p_cat = "data_error"
+                elif isinstance(dp_v, (int, float)) and dp_v < 0:
+                    p_cat = "deficit"
+                elif isinstance(p_max_v, (int, float)) and p_max_v > 60.0:
+                    p_cat = "excess"
+                elif isinstance(p_min_v, (int, float)) and p_min_v < 0:
+                    p_cat = "negative"
+                else:
+                    p_cat = "normal"
+            dedup_nodes.append({
                 "node_id": r.get("node_id"),
                 "clean_id": clean_object_id(r.get("node_id")),
                 "name": clean_object_name(r.get("name")),
                 "elevation_m": r.get("elevation_m", "—"),
                 "floors": r.get("floors", 0),
                 "required_pressure_m": r.get("required_pressure_m", "—"),
-                "free_pressure_min_m": r.get("free_pressure_min_m", "—"),
-                "free_pressure_max_m": r.get("free_pressure_max_m", "—"),
-                "margin_m": r.get("pressure_surplus_deficit_m", r.get("margin_min_m", "—")),
+                "free_pressure_min_m": p_min_v if p_min_v is not None else "—",
+                "free_pressure_max_m": p_max_v if p_max_v is not None else "—",
+                "margin_m": dp_v if dp_v is not None else "—",
                 "demand_m3_h": r.get("demand_mean_m3_h", "—"),
-            }
-            for r in dedup_nodes
-        ],
-        "pipes": [
-            {
+                "pressure_category": p_cat,
+                "advice": r.get("diagnostic_advice") or (
+                    f"Критический вакуум Pмин={p_min_v} м (проверить отметку Z={r.get('elevation_m', '—')} м и секущие задвижки)"
+                    if p_cat == "data_error" else
+                    (f"Дефицит напора ΔP={dp_v} м для {r.get('floors', 1)}-эт. застройки" if p_cat == "deficit" else
+                     (f"Избыточный напор Pмакс={p_max_v} м (>60 м, требуется PRV)" if p_cat == "excess" else "Норма"))
+                ),
+            })
+
+    raw_pipes_for_table = ppa.get("table_pipes_records") or (
+        ppa.get("top_high_loss_pipes", [])
+        + ppa.get("top_low_hazen_williams_c_pipes", [])
+        + ppa.get("closed_pipes_sample", [])
+    )
+    seen_pipe_ids: set[str] = set()
+    dedup_pipes = []
+    for p in raw_pipes_for_table:
+        pid = str(p.get("pipe_id") or "")
+        if pid and pid not in seen_pipe_ids:
+            seen_pipe_ids.add(pid)
+            v_val = p.get("velocity_max_m_s")
+            i_val = p.get("headloss_gradient_m_km")
+            c_val = p.get("hazen_williams_c")
+            is_cl = bool(p.get("is_closed")) or (isinstance(v_val, (int, float)) and v_val <= 0.001)
+            v_bin = p.get("velocity_bin")
+            if not v_bin:
+                if is_cl:
+                    v_bin = "Перекрыты / Поток = 0 (задвижка)"
+                elif isinstance(v_val, (int, float)):
+                    if v_val < 0.10:
+                        v_bin = "Низкие скорости (< 0.10 м/с)"
+                    elif v_val < 0.50:
+                        v_bin = "Умеренные (0.10–0.50 м/с)"
+                    elif v_val <= 1.50:
+                        v_bin = "Оптимум (0.50–1.50 м/с)"
+                    elif v_val < 5.00:
+                        v_bin = "Повышенные (1.50–5.00 м/с)"
+                    else:
+                        v_bin = "Большая скорость (>= 5.00 м/с)"
+                else:
+                    v_bin = "Не определен"
+            sn_clean = clean_object_id(p.get("start_node")) or "—"
+            en_clean = clean_object_id(p.get("end_node")) or "—"
+            dedup_pipes.append({
                 "pipe_id": p.get("pipe_id"),
                 "clean_id": clean_object_id(p.get("pipe_id")),
                 "name": clean_object_name(p.get("name")),
+                "start_node": sn_clean,
+                "end_node": en_clean,
                 "diameter_mm": p.get("diameter_mm", "—"),
                 "length_m": p.get("length_m", "—"),
-                "velocity_max_m_s": p.get("velocity_max_m_s", "—"),
-                "headloss_m_km": p.get("headloss_gradient_m_km", "—"),
-                "hazen_williams_c": p.get("hazen_williams_c", "—"),
+                "velocity_max_m_s": v_val if v_val is not None else "—",
+                "headloss_m_km": i_val if i_val is not None else "—",
+                "hazen_williams_c": c_val if c_val is not None else "—",
                 "flow_m3_h": p.get("flow_max_m3_h", "—"),
-            }
-            for p in (ppa.get("top_high_loss_pipes", []) + ppa.get("top_low_hazen_williams_c_pipes", []))
-        ],
+                "velocity_bin": v_bin,
+                "is_closed": is_cl,
+                "advice": p.get("diagnostic_advice") or (
+                    f"Участок перекрыт (Q=0) между узлами #{sn_clean} и #{en_clean}" if is_cl else
+                    (f"Высокие потери i={i_val} м/км (узел #{sn_clean} → #{en_clean}, C={c_val})" if isinstance(i_val, (int, float)) and i_val >= 15 else
+                     f"Режим: {v_bin} (#{sn_clean} → #{en_clean})")
+                ),
+            })
+
+    client_tables = {
+        "nodes": dedup_nodes,
+        "pipes": dedup_pipes,
         "pumps": [
             {
                 "pump_id": p.get("pump_id"),
@@ -335,11 +433,15 @@ def render_standalone_html_report(
                 "name": clean_object_name(p.get("name")),
                 "pump_type": p.get("pump_type", "Насос"),
                 "is_borehole": bool(p.get("is_borehole")),
-                "start_node": p.get("start_node", "—"),
+                "active": bool(p.get("active")),
+                "start_node": clean_object_id(p.get("start_node")) or "—",
+                "end_node": clean_object_id(p.get("end_node")) or "—",
+                "collector_pressure_m": p.get("collector_pressure_m", "—"),
                 "curve_id": p.get("curve_id", "—"),
-                "q_work": p.get("q_working_m3_h", "—"),
+                "q_work": p.get("q_working_m3_h") if p.get("q_working_m3_h") is not None else 0.0,
                 "q_nom": p.get("q_nominal_m3_h", "—"),
-                "h_work": p.get("h_working_m", p.get("h_est_m", "—")),
+                "h_work": p.get("h_working_m", p.get("h_est_m")) if p.get("h_working_m", p.get("h_est_m")) is not None else 0.0,
+                "q_ratio": p.get("q_ratio"),
                 "regime": p.get("regime", "—"),
                 "advice": p.get("diagnostic_advice", "—"),
             }
@@ -349,6 +451,8 @@ def render_standalone_html_report(
             {
                 "valve_id": v.get("valve_id"),
                 "clean_id": v.get("clean_id"),
+                "start_node": clean_object_id(v.get("start_node")) or "—",
+                "end_node": clean_object_id(v.get("end_node")) or "—",
                 "type_code": f"{v.get('type_code')} ({v.get('type_id')})",
                 "type_desc": v.get("type_desc"),
                 "setting": v.get("setting", "—"),
@@ -371,8 +475,12 @@ def render_standalone_html_report(
             "kind": "data_error",
             "level": "crit",
             "title": "Критическое отрицательное давление (< -3.0 м) — ошибка данных или отсечение участка",
-            "desc": f"Обнаружено {err_cnt} активных узлов с P < -3.0 м. Минимальный напор в узле {we_id} ({worst_e.get('free_pressure_min_m', 0):.1f} м). Нажмите для перехода к строке в таблице узлов.",
+            "desc": f"Обнаружено {err_cnt} активных узлов с P < -3.0 м. Минимальный напор в узле {we_id} ({worst_e.get('free_pressure_min_m', 0):.1f} м). Нажмите для автоматической фильтрации, сортировки и подсветки всех {err_cnt} узлов в таблице.",
             "target": "tablesSection",
+            "table_tab": "nodes",
+            "filter_preset": "data_error",
+            "sort_key": "free_pressure_min_m",
+            "sort_dir": "asc",
             "focus_id": we_id,
             "highlight_ids": [clean_object_id(r.get("node_id")) for r in pa["worst_data_error_nodes"]],
         })
@@ -387,24 +495,35 @@ def render_standalone_html_report(
             "kind": "pressure_deficit",
             "level": "crit",
             "title": "Дефицит свободного напора и необеспеченность этажности застройки",
-            "desc": f"Выявлено {def_cnt} абонентов с дефицитом давления. Лимитирующий узел {worst_id} с нехваткой ΔP = {worst_d.get('pressure_surplus_deficit_m', 0):.1f} м (нажмите для подсветки всех {len(all_def_ids)} точек на графике и в таблице).",
+            "desc": f"Выявлено {def_cnt} абонентов с дефицитом давления. Лимитирующий узел {worst_id} с нехваткой ΔP = {worst_d.get('pressure_surplus_deficit_m', 0):.1f} м (нажмите для подсветки на графике и фильтрации всех {len(all_def_ids)} точек в таблице).",
             "target": "pressureSection",
+            "table_tab": "nodes",
+            "filter_preset": "deficit",
+            "sort_key": "margin_m",
+            "sort_dir": "asc",
             "focus_id": worst_id,
             "highlight_ids": all_def_ids,
         })
 
     bneck_pts = chart_payload.get("bottleneck_pipes_points") or []
+    bneck_total_cnt = chart_payload.get("bottleneck_pipes_total_count") or ppa.get("bottleneck_pipes_count") or len(
+        [p for p in bneck_pts if (p.get("i") or 0) >= 15.0 or (p.get("v") or 0) >= 5.0]
+    ) or len(bneck_pts)
     if bneck_pts and ((bneck_pts[0].get("i") or 0) >= 15.0 or (bneck_pts[0].get("v") or 0) >= 5.0):
         worst_p = bneck_pts[0]
         wp_id = worst_p["clean_id"]
         warnings.append({
             "kind": "pipe_bottlenecks",
             "level": "warn",
-            "title": "Гидравлические узкие места и завышенные удельные потери напора",
-            "desc": f"Лимитирующий участок {wp_id} (D={worst_p.get('d')} мм) создает потери {worst_p.get('i', 0):.1f} м/км при скорости {worst_p.get('v', 0):.2f} м/с (нажмите для подсветки на графике потерь и в таблице).",
+            "title": f"Гидравлические узкие места и завышенные удельные потери напора ({bneck_total_cnt} участков)",
+            "desc": f"Обнаружено {bneck_total_cnt} точек (участков) с высокими потерями давления (в таблице и на графике: {len(bneck_pts)}). Лимитирующий участок {wp_id} (D={worst_p.get('d')} мм) создает потери {worst_p.get('i', 0):.1f} м/км при скорости {worst_p.get('v', 0):.2f} м/с (нажмите для подсветки и сортировки).",
             "target": "bottlenecksSection",
+            "table_tab": "pipes",
+            "filter_preset": "bottlenecks",
+            "sort_key": "headloss_m_km",
+            "sort_dir": "desc",
             "focus_id": wp_id,
-            "highlight_ids": [p["clean_id"] for p in bneck_pts[:30]],
+            "highlight_ids": [p["clean_id"] for p in bneck_pts[:60]],
         })
 
     under_p = pma.get("underloaded_pumps", [])
@@ -416,8 +535,12 @@ def render_standalone_html_report(
             "kind": "pump_qh",
             "level": "warn",
             "title": "Отклонение рабочих точек насосов от зоны BEP и режим скважинных агрегатов",
-            "desc": f"В недогрузке: {len(under_p)} шт., в перегрузке: {len(over_p)} шт. (скважинных 1-го подъема: {bh_cnt} шт.). Нажмите для подсветки агрегата {focus_p} на кривой Q-H.",
+            "desc": f"В недогрузке: {len(under_p)} шт., в перегрузке: {len(over_p)} шт. (скважинных 1-го подъема: {bh_cnt} шт.). Нажмите для показа агрегата {focus_p} на кривой Q-H и фильтрации в таблице насосов.",
             "target": "qhSection",
+            "table_tab": "pumps",
+            "filter_preset": "imbalance",
+            "sort_key": "q_work",
+            "sort_dir": "desc",
             "focus_id": focus_p,
             "highlight_ids": [clean_object_id(p.get("pump_id")) for p in (over_p + under_p)],
         })
@@ -430,6 +553,10 @@ def render_standalone_html_report(
             "title": "Режим работы регулирующих клапанов (PRV/PSV), источников и РЧВ",
             "desc": f"В схеме {len(valves_table)} клапанов, {len(sources_table)} источников, {len(tanks_table)} РЧВ. Клапан {top_v['clean_id']} ({top_v['type_code']}, уст. {top_v['setting']}): поток от {top_v['flow_min_m3_h']} до {top_v['flow_max_m3_h']} м³/ч.",
             "target": "valvesSection",
+            "table_tab": "valves",
+            "filter_preset": "all",
+            "sort_key": "flow_swing",
+            "sort_dir": "desc",
             "focus_id": top_v["clean_id"],
             "highlight_ids": [v["clean_id"] for v in valves_table],
         })
@@ -441,10 +568,14 @@ def render_standalone_html_report(
             "kind": "stagnation",
             "level": "warn",
             "title": "Закрытые задвижками участки (Q = 0) и зоны пониженных скоростей (< 0.1 м/с)",
-            "desc": f"Перекрыто задвижкой: {kpi_closed_pipes} участков, малопроточных участков: {kpi_v_stag} шт. Нажмите для перехода к диаграмме скоростей.",
+            "desc": f"Перекрыто задвижкой: {kpi_closed_pipes} участков, малопроточных участков: {kpi_v_stag} шт. Нажмите для перехода к диаграмме скоростей и фильтрации закрытых труб.",
             "target": "stagnationSection",
+            "table_tab": "pipes",
+            "filter_preset": "closed",
+            "sort_key": "velocity_max_m_s",
+            "sort_dir": "asc",
             "focus_id": None,
-            "highlight_ids": [],
+            "highlight_ids": [clean_object_id(p.get("pipe_id")) for p in ppa.get("closed_pipes_sample", [])],
         })
 
     kpi_excess = pa.get("excess_over_60m_count", 0)
@@ -455,8 +586,12 @@ def render_standalone_html_report(
             "kind": "excess_pressure",
             "level": "warn",
             "title": "Избыточный свободный напор (> 60 м по СП 31.13330.2021)",
-            "desc": f"Выявлено {kpi_excess} узлов с давлением выше 60 м (максимум в узле {ex_id}: {top_ex.get('free_pressure_max_m', 0):.1f} м). Нажмите для перехода к таблице узлов.",
+            "desc": f"Выявлено {kpi_excess} узлов с давлением выше 60 м (максимум в узле {ex_id}: {top_ex.get('free_pressure_max_m', 0):.1f} м). Нажмите для автоматической фильтрации и сортировки этих узлов в таблице.",
             "target": "tablesSection",
+            "table_tab": "nodes",
+            "filter_preset": "excess",
+            "sort_key": "free_pressure_max_m",
+            "sort_dir": "desc",
             "focus_id": ex_id,
             "highlight_ids": [clean_object_id(r.get("node_id")) for r in pa["top_excess_nodes"]],
         })
@@ -465,7 +600,7 @@ def render_standalone_html_report(
         f'<div class="warning-card warning-{w["level"]}" onclick=\'onWarningClick({json.dumps(w, ensure_ascii=False)})\'>'
         f'  <div class="warning-header">'
         f'    <div class="warning-title">{html.escape(w["title"])}</div>'
-        f'    <span class="warning-link">Подсветить на графике и в таблице →</span>'
+        f'    <span class="warning-link">Отфильтровать в таблице и показать на графике →</span>'
         f'  </div>'
         f'  <div class="warning-desc">{html.escape(w["desc"])}</div>'
         f'</div>'
@@ -492,17 +627,24 @@ def render_standalone_html_report(
     kpi_total_pumps = pma.get("total_pumps", 0)
     kpi_bh_pumps = pma.get("borehole_total_count", 0)
 
+    # Очищаем метки времени от любых (R360)
+    raw_hours_labels = chart_payload.get("hours_labels") or [f"{h:02d}:00" for h in range(24)]
+    clean_hours_labels = [re.sub(r"\s*\(R\d+\)", "", str(lbl)).strip() for lbl in raw_hours_labels]
+
     payload_dict = {
         "city_name": cname,
-        "hours_labels": chart_payload.get("hours_labels", [f"{h:02d}:00" for h in range(24)]),
-        "step_labels": chart_payload.get("step_labels", [f"R{h}" for h in range(24)]),
+        "hours_labels": clean_hours_labels,
+        "step_labels": [re.sub(r"\s*\(R\d+\)", "", str(lbl)).strip() for lbl in (chart_payload.get("step_labels") or [f"{h:02d}:00" for h in range(24)])],
         "diurnal_demand_m3_h": chart_payload.get("diurnal_demand_m3_h"),
         "diurnal_pump_flow_m3_h": chart_payload.get("diurnal_pump_flow_m3_h"),
         "valves_hourly_series": chart_payload.get("valves_hourly_series", []),
         "diurnal_free_pressure_percentiles_m": chart_payload.get("diurnal_free_pressure_percentiles_m"),
         "node_hourly_pressures": chart_payload.get("node_hourly_pressures", {}),
+        "pipe_hourly_flows": chart_payload.get("pipe_hourly_flows", {}),
+        "pump_hourly_flows": chart_payload.get("pump_hourly_flows", {}),
         "deficit_nodes_points": def_pts,
         "bottleneck_pipes_points": bneck_pts,
+        "bottleneck_pipes_total_count": bneck_total_cnt,
         "qh_curves": chart_payload.get("qh_curves", []),
         "pressure_bins": chart_payload.get("pressure_bins", {}),
         "velocity_bins": chart_payload.get("velocity_bins", {}),
@@ -517,7 +659,7 @@ def render_standalone_html_report(
         "tanks_table": tanks_table,
         "data_export_warnings": facts.get("data_export_warnings", []),
     }
-    payload_json = json.dumps(payload_dict, ensure_ascii=False).replace("<", "\\u003c")
+    payload_json = json.dumps(payload_dict, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="ru">
@@ -531,19 +673,19 @@ def render_standalone_html_report(
     --line: #e2e8f0; --brand: #0284c7; --ok: #10b981; --warn: #f59e0b; --crit: #ef4444; --radius: 12px;
   }}
   * {{ box-sizing: border-box; }}
-  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); line-height: 1.55; }}
-  .container {{ max-width: 1400px; margin: 0 auto; padding: 22px 20px 60px; }}
+  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); line-height: 1.55; font-variant-numeric: tabular-nums; }}
+  .container {{ max-width: 1440px; margin: 0 auto; padding: 22px 20px 60px; }}
   .hero {{ background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); color: #fff; border-radius: var(--radius); padding: 24px 30px; display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }}
   .hero h1 {{ margin: 0 0 6px; font-size: 24px; font-weight: 700; }}
   .hero-sub {{ margin: 0; color: #cbd5e1; font-size: 13.5px; }}
   .btn-print {{ background: #0284c7; color: #fff; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; }}
   .warnings-container {{ margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }}
   .warning-card {{ background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; cursor: pointer; transition: all 0.15s ease; }}
-  .warning-card:hover {{ transform: translateY(-2px); box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08); }}
-  .warning-crit {{ border-left: 5px solid var(--crit); background: #fef2f2; }}
-  .warning-warn {{ border-left: 5px solid var(--warn); background: #fffbeb; }}
-  .warning-ok {{ border-left: 5px solid var(--ok); background: #f0fdf4; }}
-  .warning-header {{ display: flex; justify-content: space-between; align-items: center; gap: 10px; }}
+  .warning-card:hover {{ transform: translateY(-2px); box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08); border-color: #94a3b8; }}
+  .warning-crit {{ border-left: 4px solid var(--crit); background: #fef2f2; }}
+  .warning-warn {{ border-left: 4px solid var(--warn); background: #fffbeb; }}
+  .warning-ok {{ border-left: 4px solid var(--ok); background: #f0fdf4; }}
+  .warning-header {{ display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }}
   .warning-title {{ font-weight: 700; font-size: 14.5px; }}
   .warning-link {{ font-size: 12.5px; font-weight: 700; color: var(--brand); }}
   .warning-desc {{ font-size: 13px; color: #334155; margin-top: 4px; }}
@@ -559,46 +701,72 @@ def render_standalone_html_report(
   .panel-header {{ display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }}
   .panel-title {{ margin: 0; font-size: 15.5px; font-weight: 700; }}
   .panel-controls {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
-  select.curve-select {{ padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: #f8fafc; font-size: 12.5px; font-weight: 600; }}
-  .btn-subtle {{ background: #f1f5f9; border: 1px solid #cbd5e1; color: var(--ink); padding: 5px 12px; border-radius: 6px; font-size: 12.5px; font-weight: 600; cursor: pointer; }}
+  select.curve-select {{ padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: #f8fafc; font-size: 12.5px; font-weight: 600; max-width: 340px; }}
+  .btn-subtle {{ background: #f1f5f9; border: 1px solid #cbd5e1; color: var(--ink); padding: 5px 12px; border-radius: 6px; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: all 0.12s; }}
   .btn-subtle:hover, .btn-subtle.active {{ background: var(--brand); color: #fff; border-color: var(--brand); }}
-  .canvas-box {{ position: relative; width: 100%; height: 310px; }}
-  canvas {{ width: 100%; height: 100%; display: block; }}
+  .canvas-box {{ position: relative; width: 100%; height: 320px; }}
+  canvas {{ width: 100%; height: 100%; display: block; cursor: crosshair; }}
+  .chart-legend-inline {{ display: flex; gap: 16px; align-items: center; font-size: 12px; font-weight: 600; color: #334155; flex-wrap: wrap; }}
+  .legend-item {{ display: inline-flex; align-items: center; gap: 6px; }}
+  .legend-swatch {{ width: 18px; height: 4px; border-radius: 2px; display: inline-block; }}
   .accordion-wrap {{ margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }}
-  .btn-analysis {{ background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; border: none; border-radius: 6px; padding: 6px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; }}
-  .analysis-box {{ display: none; margin-top: 10px; background: #f8fafc; border-left: 4px solid var(--brand); border-radius: 8px; padding: 12px 16px; font-size: 13px; color: #1e293b; line-height: 1.55; }}
-  .ai-report-card {{ margin-top: 24px; background: var(--card); border: 1px solid #cbd5e1; border-left: 5px solid var(--brand); border-radius: var(--radius); padding: 22px 26px; }}
+  .analysis-actions {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
+  .btn-analysis {{ background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; border: none; border-radius: 6px; padding: 7px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }}
+  .btn-analysis:hover {{ background: #0369a1; }}
+  .analysis-box {{ display: none; margin-top: 10px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px 16px; font-size: 13px; color: #1e293b; line-height: 1.6; }}
+  .ai-chat-followup {{ display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #cbd5e1; }}
+  .ai-chat-followup input {{ flex: 1; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12.5px; }}
+  .ai-report-card {{ margin-top: 24px; background: var(--card); border: 1px solid #cbd5e1; border-radius: var(--radius); padding: 22px 26px; }}
   .ai-content h1.ai-h1 {{ font-size: 19px; margin: 0 0 12px; color: #0c4a6e; }}
   .ai-content h2.ai-h2 {{ font-size: 15.5px; margin: 18px 0 8px; color: #0284c7; border-bottom: 1px dashed #cbd5e1; padding-bottom: 4px; }}
   .ai-content p, .ai-content li {{ font-size: 13.5px; }}
+  .filter-action-link {{ background: #e0f2fe; border: 1px solid #7dd3fc; color: #0369a1; border-radius: 6px; padding: 1px 8px; font-size: 12.5px; font-weight: 700; cursor: pointer; margin: 0 2px; }}
+  .filter-action-link:hover {{ background: #0284c7; color: #fff; }}
   .map-section {{ margin-top: 26px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }}
   .map-controls {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0 12px; }}
   .map-controls input[type=text] {{ padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; min-width: 220px; }}
-  .timeline-bar {{ display: flex; align-items: center; gap: 12px; background: #f1f5f9; padding: 8px 14px; border-radius: 8px; margin-bottom: 10px; font-size: 13px; }}
-  .timeline-bar input[type=range] {{ flex: 1; accent-color: var(--brand); cursor: pointer; }}
-  .map-canvas-wrap {{ position: relative; width: 100%; height: 500px; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }}
-  .map-card-dock {{ position: absolute; bottom: 12px; right: 12px; width: 350px; background: rgba(255,255,255,0.97); border: 1px solid #cbd5e1; border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,0.12); padding: 14px 16px; font-size: 12.5px; z-index: 10; display: none; }}
+  .timeline-box {{ background: #f1f5f9; border: 1px solid #e2e8f0; padding: 10px 14px; border-radius: 8px; margin-bottom: 10px; }}
+  .timeline-bar {{ display: flex; align-items: center; gap: 10px; font-size: 13px; }}
+  .timeline-bar input[type=range] {{ flex: 1; accent-color: var(--brand); cursor: pointer; margin: 0; }}
+  .timeline-ticks {{ display: flex; justify-content: space-between; padding: 4px 2px 0; font-size: 10.5px; color: #64748b; font-weight: 600; user-select: none; }}
+  .timeline-ticks span {{ cursor: pointer; padding: 1px 3px; border-radius: 3px; }}
+  .timeline-ticks span:hover {{ background: #e2e8f0; color: #0f172a; }}
+  .map-canvas-wrap {{ position: relative; width: 100%; height: 520px; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }}
+  #networkMap {{ cursor: grab; }}
+  #networkMap:active {{ cursor: grabbing; }}
+  .map-card-dock {{ position: absolute; bottom: 12px; right: 12px; width: 370px; max-width: calc(100% - 24px); background: rgba(255,255,255,0.98); border: 1px solid #94a3b8; border-radius: 10px; box-shadow: 0 8px 24px rgba(15,23,42,0.16); padding: 14px 16px; font-size: 12.5px; z-index: 10; display: none; }}
   .map-card-header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 8px; font-weight: 700; }}
-  .map-card-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }}
+  .map-card-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }}
   .map-prop-label {{ font-size: 11px; color: var(--muted); }}
   .map-prop-val {{ font-weight: 600; color: var(--ink); }}
   .tables-section {{ margin-top: 26px; }}
-  .table-tabs {{ display: flex; gap: 8px; margin-bottom: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; flex-wrap: wrap; }}
+  .table-tabs {{ display: flex; gap: 8px; margin-bottom: 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; flex-wrap: wrap; align-items: center; }}
   .table-tab-btn {{ background: transparent; border: none; padding: 8px 14px; border-radius: 6px; font-size: 13.5px; font-weight: 600; color: var(--muted); cursor: pointer; }}
   .table-tab-btn.active {{ background: #e0f2fe; color: #0369a1; }}
-  .table-toolbar {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }}
-  .table-wrap {{ overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; max-height: 420px; }}
+  .table-toolbar {{ display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }}
+  .table-filters {{ display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }}
+  .filter-chip {{ background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.12s; }}
+  .filter-chip:hover {{ background: #e2e8f0; }}
+  .filter-chip.active {{ background: #0284c7; color: #fff; border-color: #0284c7; }}
+  .table-status-banner {{ font-size: 12px; color: #0369a1; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 6px 12px; margin-bottom: 8px; display: none; justify-content: space-between; align-items: center; }}
+  .table-wrap {{ overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; max-height: 480px; }}
   table.data-table {{ width: 100%; border-collapse: collapse; font-size: 12.5px; text-align: left; }}
-  table.data-table th {{ position: sticky; top: 0; background: #f8fafc; padding: 8px 10px; border-bottom: 1px solid var(--line); font-weight: 600; cursor: pointer; }}
-  table.data-table td {{ padding: 7px 10px; border-bottom: 1px solid #f1f5f9; }}
-  table.data-table tr.row-highlighted td {{ background: #fef2f2 !important; font-weight: 700; }}
+  table.data-table th {{ position: sticky; top: 0; background: #f8fafc; padding: 9px 10px; border-bottom: 2px solid var(--line); font-weight: 700; cursor: pointer; user-select: none; white-space: nowrap; z-index: 2; }}
+  table.data-table th:hover {{ background: #e2e8f0; color: var(--brand); }}
+  table.data-table td {{ padding: 7px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }}
+  table.data-table tr:hover td {{ background: #f8fafc; }}
+  table.data-table tr.row-highlighted td {{ background: #fef2f2 !important; font-weight: 600; }}
+  table.data-table tr.row-focused td {{ background: #fef08a !important; font-weight: 700; outline: 2px solid #f59e0b; }}
   .object-link {{ background: transparent; border: none; border-bottom: 1px dashed var(--brand); color: var(--brand); font: inherit; font-weight: 700; cursor: pointer; padding: 0 2px; }}
-  .badge-bh {{ background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; }}
-  .badge-net {{ background: #e0f2fe; color: #075985; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; }}
+  .object-link:hover {{ color: #0369a1; background: #e0f2fe; border-radius: 3px; }}
+  .map-jump-btn {{ background: #f0f9ff; border: 1px solid #7dd3fc; color: #0369a1; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: 600; cursor: pointer; margin-left: 6px; }}
+  .map-jump-btn:hover {{ background: #0284c7; color: #fff; }}
+  .badge-bh {{ color: #166534; font-weight: 700; }}
+  .badge-net {{ color: #075985; font-weight: 700; }}
   .num-crit {{ color: var(--crit); font-weight: 700; }}
   .num-warn {{ color: var(--warn); font-weight: 700; }}
   .num-ok {{ color: var(--ok); font-weight: 700; }}
-  #chartTooltip {{ position: absolute; display: none; pointer-events: none; background: rgba(15, 23, 42, 0.95); border: 1px solid #38bdf8; border-radius: 8px; color: #f8fafc; padding: 8px 12px; font-size: 12px; line-height: 1.45; z-index: 10000; white-space: nowrap; }}
+  #chartTooltip {{ position: absolute; display: none; pointer-events: none; background: rgba(15, 23, 42, 0.96); border: 1px solid #38bdf8; border-radius: 8px; color: #f8fafc; padding: 9px 12px; font-size: 12px; line-height: 1.45; z-index: 10000; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,0.25); }}
 </style>
 </head>
 <body>
@@ -613,7 +781,9 @@ def render_standalone_html_report(
         Время расчета: <strong>{total_s} сек</strong>
       </p>
     </div>
-    <div><button class="btn-print" onclick="window.print()">Печать / PDF</button></div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button class="btn-print" onclick="window.print()">Печать / PDF</button>
+    </div>
   </header>
 
   <section class="warnings-container">{warnings_html}</section>
@@ -635,9 +805,9 @@ def render_standalone_html_report(
       <div class="kpi-sub">Труб: <strong>{kpi_pipes_cnt:,}</strong> • Перекрыто задвижкой (Q=0): <strong>{kpi_closed_pipes}</strong></div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-title">Скоростной режим</div>
+      <div class="kpi-title">Скоростной режим и потери</div>
       <div class="kpi-val">{kpi_max_v_str} м/с</div>
-      <div class="kpi-sub">Малопроточных (&lt;0.1 м/с): <strong>{kpi_v_stag:,}</strong></div>
+      <div class="kpi-sub">Узких мест (потери): <strong>{bneck_total_cnt}</strong> • Малопроточных (&lt;0.1 м/с): <strong>{kpi_v_stag:,}</strong></div>
     </div>
     <div class="kpi-card">
       <div class="kpi-title">Насосы и Скважины 1-го подъема</div>
@@ -662,11 +832,15 @@ def render_standalone_html_report(
         <div class="panel-controls">
           <select id="qhSelect" class="curve-select" onchange="onQHSelectChange(this.value)"></select>
           <button id="qhShowAll" class="btn-subtle" onclick="toggleQHShowAll()">Показать все</button>
+          <button class="btn-subtle" onclick="jumpFromCurrentPumpToTable()" title="Показать выбранный насос в таблице">В таблицу ↓</button>
         </div>
       </div>
       <div class="canvas-box"><canvas id="qhCanvas"></canvas></div>
       <div class="accordion-wrap">
-        <button class="btn-analysis" onclick="generateLiveAnalysis('qh')">Сгенерировать развернутый анализ графика</button>
+        <div class="analysis-actions">
+          <button class="btn-analysis" onclick="generateLiveAnalysis('qh')">Сгенерировать ИИ-анализ выбранного насоса и коллектора</button>
+          <span style="font-size:11.5px;color:var(--muted)">Клик по рабочей точке на графике подсветит насос в таблице</span>
+        </div>
         <div id="qhAnalysis" class="analysis-box"></div>
       </div>
     </div>
@@ -681,18 +855,27 @@ def render_standalone_html_report(
       </div>
       <div class="canvas-box"><canvas id="pressureBandCanvas"></canvas></div>
       <div class="accordion-wrap">
-        <button class="btn-analysis" onclick="generateLiveAnalysis('pressure')">Сгенерировать развернутый анализ графика</button>
+        <div class="analysis-actions">
+          <button class="btn-analysis" onclick="generateLiveAnalysis('pressure')">Сгенерировать ИИ-анализ графика напоров</button>
+          <span style="font-size:11.5px;color:var(--muted)">Кликните по любой точке дефицита для перехода к строке в таблице узлов</span>
+        </div>
         <div id="pressureAnalysis" class="analysis-box"></div>
       </div>
     </div>
 
     <div class="panel" id="bottlenecksSection">
       <div class="panel-header">
-        <h3 class="panel-title">Гидравлические узкие места: скорость потока V (м/с) и потери i (м/км)</h3>
+        <h3 class="panel-title">Гидравлические узкие места ({bneck_total_cnt} уч.): скорость V (м/с) и потери i (м/км)</h3>
+        <div class="panel-controls">
+          <button class="btn-subtle" onclick="applyQuickFilterFromAI('pipes', 'bottlenecks')">Все {bneck_total_cnt} в таблице ↓</button>
+        </div>
       </div>
       <div class="canvas-box"><canvas id="bottlenecksCanvas"></canvas></div>
       <div class="accordion-wrap">
-        <button class="btn-analysis" onclick="generateLiveAnalysis('bottlenecks')">Сгенерировать развернутый анализ графика</button>
+        <div class="analysis-actions">
+          <button class="btn-analysis" onclick="generateLiveAnalysis('bottlenecks')">Сгенерировать ИИ-анализ узких мест</button>
+          <span style="font-size:11.5px;color:var(--muted)">Кликните по точке на графике для подсветки трубы в таблице и перехода на карту</span>
+        </div>
         <div id="bottlenecksAnalysis" class="analysis-box"></div>
       </div>
     </div>
@@ -700,10 +883,13 @@ def render_standalone_html_report(
     <div class="panel" id="stagnationSection">
       <div class="panel-header">
         <h3 class="panel-title">Круговая диаграмма распределения скоростей потока в сети</h3>
+        <span style="font-size:11.5px;color:var(--brand);font-weight:600">Клик по сектору или легенде фильтрует таблицу труб ↓</span>
       </div>
       <div class="canvas-box"><canvas id="stagnationCanvas"></canvas></div>
       <div class="accordion-wrap">
-        <button class="btn-analysis" onclick="generateLiveAnalysis('stagnation')">Сгенерировать развернутый анализ графика</button>
+        <div class="analysis-actions">
+          <button class="btn-analysis" onclick="generateLiveAnalysis('stagnation')">Сгенерировать ИИ-анализ скоростного режима</button>
+        </div>
         <div id="stagnationAnalysis" class="analysis-box"></div>
       </div>
     </div>
@@ -714,7 +900,7 @@ def render_standalone_html_report(
       </div>
       <div class="canvas-box"><canvas id="valvesCanvas"></canvas></div>
       <div class="accordion-wrap">
-        <button class="btn-analysis" onclick="generateLiveAnalysis('valves')">Сгенерировать развернутый анализ графика</button>
+        <button class="btn-analysis" onclick="generateLiveAnalysis('valves')">Сгенерировать ИИ-анализ работы клапанов</button>
         <div id="valvesAnalysis" class="analysis-box"></div>
       </div>
     </div>
@@ -722,10 +908,14 @@ def render_standalone_html_report(
     <div class="panel" id="diurnalSection" style="{'display:flex' if informative_charts.get('diurnal_balance', True) else 'display:none'}">
       <div class="panel-header">
         <h3 class="panel-title">Суточный баланс подачи насосов и потребления сети (24 ч)</h3>
+        <div class="chart-legend-inline">
+          <span class="legend-item"><span class="legend-swatch" style="background:#0284c7"></span>Потребление сети (абоненты), м³/ч</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#0d9488"></span>Подача насосных станций, м³/ч</span>
+        </div>
       </div>
       <div class="canvas-box"><canvas id="diurnalFlowCanvas"></canvas></div>
       <div class="accordion-wrap">
-        <button class="btn-analysis" onclick="generateLiveAnalysis('diurnal')">Сгенерировать развернутый анализ графика</button>
+        <button class="btn-analysis" onclick="generateLiveAnalysis('diurnal')">Сгенерировать ИИ-анализ суточного баланса</button>
         <div id="diurnalAnalysis" class="analysis-box"></div>
       </div>
     </div>
@@ -734,20 +924,25 @@ def render_standalone_html_report(
   <section class="map-section" id="mapSection">
     <div class="panel-header">
       <div>
-        <h3 class="panel-title" style="font-size:16px">Интерактивная карта сети с временной шкалой (Скважины, РЧВ, Клапаны и все узлы)</h3>
-        <p style="margin:2px 0 0;font-size:12.5px;color:var(--muted)">Кликните по любому узлу (включая транзитные), трубе, скважинному насосу или источнику для просмотра полного паспорта.</p>
+        <h3 class="panel-title" style="font-size:16px">Интерактивная карта сети с детальной временной шкалой (Скважины, РЧВ, Клапаны и все узлы)</h3>
+        <p style="margin:2px 0 0;font-size:12.5px;color:var(--muted)">Выбранный объект подсвечивается пульсирующим маркером. При перемещении ползунка времени значения в карточке объекта обновляются мгновенно.</p>
       </div>
     </div>
-    <div class="timeline-bar">
-      <strong>Временная шкала (шаг расчета):</strong>
-      <input type="range" id="mapTimelineRange" min="0" max="23" value="0" oninput="onMapTimelineChange(this.value)">
-      <span id="mapTimelineLabel" style="font-weight:700;color:var(--brand);min-width:140px;">00:00 (R0)</span>
+    <div class="timeline-box">
+      <div class="timeline-bar">
+        <strong>Время расчета:</strong>
+        <button type="button" class="btn-subtle" style="padding:2px 8px" onclick="stepTimeline(-1)" title="Предыдущий шаг">◀</button>
+        <input type="range" id="mapTimelineRange" min="0" max="{max(0, len(clean_hours_labels) - 1)}" value="0" step="1" oninput="onMapTimelineChange(this.value)">
+        <button type="button" class="btn-subtle" style="padding:2px 8px" onclick="stepTimeline(1)" title="Следующий шаг">▶</button>
+        <span id="mapTimelineLabel" style="font-weight:800;color:var(--brand);min-width:70px;text-align:right">{clean_hours_labels[0] if clean_hours_labels else '00:00'}</span>
+      </div>
+      <div class="timeline-ticks" id="mapTimelineTicks"></div>
     </div>
     <div class="map-controls">
-      <button type="button" id="mapPlus" class="btn-subtle">＋</button>
-      <button type="button" id="mapMinus" class="btn-subtle">−</button>
+      <button type="button" id="mapPlus" class="btn-subtle" title="Приблизить к центру">＋ Приблизить</button>
+      <button type="button" id="mapMinus" class="btn-subtle" title="Отдалить от центра">− Отдалить</button>
       <button type="button" id="mapReset" class="btn-subtle">Вся сеть</button>
-      <input type="text" id="mapSearch" placeholder="Поиск по ID (например, 3459771)">
+      <input type="text" id="mapSearch" placeholder="Поиск по ID (например, 3459771)" onkeydown="if(event.key==='Enter')document.getElementById('mapFind').click()">
       <button type="button" id="mapFind" class="btn-subtle">Найти на карте</button>
       <span id="mapInfo" style="font-size:12px;color:var(--muted);margin-left:auto"></span>
     </div>
@@ -756,7 +951,7 @@ def render_standalone_html_report(
       <div id="mapObjectCard" class="map-card-dock">
         <div class="map-card-header">
           <span id="mapCardTitle">Паспорт объекта</span>
-          <button type="button" style="background:none;border:none;font-size:16px;cursor:pointer;" onclick="closeMapCard()">×</button>
+          <button type="button" style="background:none;border:none;font-size:18px;cursor:pointer;line-height:1" onclick="closeMapCard()">×</button>
         </div>
         <div id="mapCardBody" class="map-card-grid"></div>
       </div>
@@ -767,15 +962,24 @@ def render_standalone_html_report(
     <div class="panel">
       <div class="table-tabs">
         <button type="button" class="table-tab-btn active" id="tabBtn_nodes" onclick="switchTableTab('nodes', this)">Узлы абонентов ({len(client_tables['nodes'])})</button>
-        <button type="button" class="table-tab-btn" id="tabBtn_pipes" onclick="switchTableTab('pipes', this)">Трубопроводы и потери ({len(client_tables['pipes'])})</button>
+        <button type="button" class="table-tab-btn" id="tabBtn_pipes" onclick="switchTableTab('pipes', this)">Трубопроводы и скорости ({len(client_tables['pipes'])})</button>
         <button type="button" class="table-tab-btn" id="tabBtn_pumps" onclick="switchTableTab('pumps', this)">Насосы и Скважины ({len(client_tables['pumps'])})</button>
         <button type="button" class="table-tab-btn" id="tabBtn_valves" onclick="switchTableTab('valves', this)">Клапаны PRV/PSV ({len(client_tables['valves'])})</button>
+        <button type="button" class="btn-analysis" style="margin-left:auto" onclick="generateTableAIAnalysis()">ИИ-разбор текущей выборки таблицы</button>
       </div>
       <div class="table-toolbar">
         <div id="tableFilters" class="table-filters"></div>
-        <input id="tableSearchInput" style="padding:6px 12px;border:1px solid #cbd5e1;border-radius:6px;" placeholder="Поиск по ID или параметру..." oninput="onTableSearch(this.value)">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input id="tableSearchInput" style="padding:6px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:12.5px;min-width:220px;" placeholder="Поиск по ID, узлу или диагнозу..." oninput="onTableSearch(this.value)">
+          <button type="button" class="btn-subtle" onclick="resetTableFilters()">Сбросить фильтр</button>
+        </div>
       </div>
-      <div class="table-wrap">
+      <div id="tableStatusBanner" class="table-status-banner">
+        <span id="tableStatusText"></span>
+        <button type="button" class="btn-subtle" style="padding:2px 8px;font-size:11.5px" onclick="resetTableFilters()">Показать все строки</button>
+      </div>
+      <div id="tableAIAnalysisBox" class="analysis-box" style="margin-bottom:10px;"></div>
+      <div class="table-wrap" id="mainTableScrollWrap">
         <table id="mainDataTable" class="data-table">
           <thead id="mainTableHead"></thead>
           <tbody id="mainTableBody"></tbody>
@@ -787,9 +991,16 @@ def render_standalone_html_report(
 
 <script>
 const DATA = {payload_json};
-let currentTimelineHour = 0;
+// Принудительно очищаем любые старые суффиксы (R360) из меток времени
+DATA.hours_labels = (DATA.hours_labels || []).map(l => String(l).replace(/\\s*\\(R\\d+\\)/gi, '').trim());
+DATA.step_labels = (DATA.step_labels || []).map(l => String(l).replace(/\\s*\\(R\\d+\\)/gi, '').trim());
+
+let currentTimelineStep = 0;
 let highlightedObjectId = null;
+let selectedMapObjectId = null;
+let highlightIdsSet = new Set();
 let pressureChartMode = (DATA.deficit_nodes_points && DATA.deficit_nodes_points.length > 0) ? 'points' : 'corridor';
+let hoveredPieSliceIdx = -1;
 
 (function applyAISectionOrder() {{
   const grid = document.getElementById('dynamicChartsGrid');
@@ -804,13 +1015,30 @@ function clean_object_id(id) {{
   return String(id).trim().replace(/^[ceputvk](\\d+)$/i, '$1');
 }}
 
+function formatTextWithObjectButtons(str) {{
+  if (!str) return '—';
+  const escaped = String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return escaped.replace(/#([ceputvk]?\\d{{4,}})/gi, (_, rawId) => {{
+    const cid = clean_object_id(rawId);
+    return `<button type="button" class="object-link" data-map-id="${{cid}}" title="Показать объект #${{cid}} на карте">#${{cid}}</button>`;
+  }});
+}}
+
 function setupHiDPICanvas(canvas) {{
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.parentElement.getBoundingClientRect();
   const w = Math.max(rect.width, 320), h = Math.max(rect.height, 240);
-  canvas.width = w * dpr; canvas.height = h * dpr;
+  const targetW = Math.round(w * dpr), targetH = Math.round(h * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {{
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }}
   const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
   return {{ ctx, w, h }};
 }}
 
@@ -850,11 +1078,19 @@ function showChartTooltip(ev, htmlStr) {{
   chartTooltipEl.innerHTML = htmlStr;
   chartTooltipEl.style.display = 'block';
   let tx = ev.pageX + 14, ty = ev.pageY - 36;
-  if (tx + 280 > window.innerWidth) tx = ev.pageX - 280;
+  if (tx + 300 > window.innerWidth) tx = ev.pageX - 300;
   chartTooltipEl.style.left = tx + 'px';
   chartTooltipEl.style.top = ty + 'px';
 }}
 function hideChartTooltip() {{ chartTooltipEl.style.display = 'none'; }}
+
+function clearAnalysisBox(boxId) {{
+  const el = document.getElementById(boxId);
+  if (el) {{
+    el.style.display = 'none';
+    el.innerHTML = '';
+  }}
+}}
 
 let qhShowAllMode = false, currentQHIndex = 0;
 function drawQHCurve(idx, hoverPt = null) {{
@@ -862,7 +1098,7 @@ function drawQHCurve(idx, hoverPt = null) {{
   const curves = DATA.qh_curves || [];
   if (!curves.length) return;
   const {{ ctx, w, h }} = setupHiDPICanvas(canvas);
-  const pad = {{ l: 58, r: 24, t: 24, b: 42 }};
+  const pad = {{ l: 58, r: 24, t: 28, b: 42 }};
   const pw = w - pad.l - pad.r, ph = h - pad.t - pad.b;
   const curvesToPlot = qhShowAllMode ? curves : [curves[idx] || curves[0]];
 
@@ -890,7 +1126,8 @@ function drawQHCurve(idx, hoverPt = null) {{
   ctx.save(); ctx.translate(15, pad.t + ph / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText('Развиваемый напор H, м', 0, 0); ctx.restore();
 
-  curvesToPlot.forEach(item => {{
+  const opPoints = [];
+  curvesToPlot.forEach((item, cIdx) => {{
     const pts = item.curve_points || [];
     if (!qhShowAllMode && item.q_nominal_m3_h > 0) {{
       const x1 = xOf(item.q_nominal_m3_h * 0.75), x2 = xOf(Math.min(maxQ, item.q_nominal_m3_h * 1.15));
@@ -900,33 +1137,38 @@ function drawQHCurve(idx, hoverPt = null) {{
       ctx.fillText('Оптимум BEP (75–115%)', (x1 + x2) / 2, pad.t + 14);
     }}
     ctx.strokeStyle = item.is_borehole ? '#059669' : '#0284c7';
-    ctx.lineWidth = 2.6;
+    ctx.lineWidth = qhShowAllMode ? 1.6 : 2.8;
     ctx.beginPath();
     pts.forEach((p, i) => {{ if (i === 0) ctx.moveTo(xOf(p[0]), yOf(p[1])); else ctx.lineTo(xOf(p[0]), yOf(p[1])); }});
     ctx.stroke();
 
     if (item.active && item.operating_q_mean !== null && item.operating_h_est !== null) {{
       const ox = xOf(item.operating_q_mean), oy = yOf(item.operating_h_est);
+      opPoints.push({{ px: ox, py: oy, item }});
       ctx.fillStyle = '#ef4444'; ctx.beginPath(); ctx.arc(ox, oy, 6.5, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
       if (!qhShowAllMode) {{
         const tag = item.is_borehole ? 'Скважинный' : 'Сетевой';
         ctx.fillStyle = '#0f172a'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left';
-        ctx.fillText(`${{tag}} #${{item.clean_id}}: Q=${{item.operating_q_mean}} м³/ч, H=${{item.operating_h_est}} м`, Math.min(ox + 10, w - 260), Math.max(pad.t + 26, oy - 8));
+        ctx.fillText(`${{tag}} #${{item.clean_id}}: Q=${{item.operating_q_mean}} м³/ч, H=${{item.operating_h_est}} м`, Math.min(ox + 10, w - 270), Math.max(pad.t + 26, oy - 8));
       }}
+    }} else if (!qhShowAllMode && !item.active) {{
+      ctx.fillStyle = '#64748b'; ctx.font = 'bold 11.5px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(`Агрегат #${{item.clean_id}} выключен / в резерве (Q = 0 м³/ч)`, pad.l + 12, pad.t + 28);
     }}
   }});
 
   if (hoverPt) {{
     drawCrosshairProjections(ctx, pad, pw, ph, hoverPt.px, hoverPt.py, `Q=${{hoverPt.q.toFixed(1)}}`, `H=${{hoverPt.h.toFixed(1)}}`);
   }}
-  canvas._meta = {{ pad, pw, ph, maxQ, maxH, curvesToPlot }};
+  canvas._meta = {{ pad, pw, ph, maxQ, maxH, curvesToPlot, opPoints }};
 }}
 
 function switchPressureMode(mode) {{
   pressureChartMode = mode;
   document.getElementById('btnModeDeficitPts').classList.toggle('active', mode === 'points');
   document.getElementById('btnModeCorridor').classList.toggle('active', mode === 'corridor');
+  clearAnalysisBox('pressureAnalysis');
   drawPressureBand();
 }}
 
@@ -954,7 +1196,7 @@ function drawPressureBand(hoverPt = null) {{
       ctx.textAlign = 'center'; ctx.fillText(xv.toFixed(0), x, h - pad.b + 16);
     }}
     ctx.fillStyle = '#0f172a'; ctx.font = 'bold 11.5px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('Геодезическая отметка абонента Z, м', pad.l + pw / 2, h - 6);
+    ctx.fillText('Геодезическая отметка абонента Z, м (клик по точке → строка в таблице)', pad.l + pw / 2, h - 6);
     ctx.save(); ctx.translate(15, pad.t + ph / 2); ctx.rotate(-Math.PI / 2);
     ctx.fillText('Дефицит напора ΔP = Pсвоб − Pтреб, м', 0, 0); ctx.restore();
 
@@ -969,13 +1211,13 @@ function drawPressureBand(hoverPt = null) {{
       const isWorst = idx === 0 || p.clean_id === highlightedObjectId;
       ctx.beginPath();
       ctx.arc(px, py, isWorst ? 8 : 5, 0, Math.PI * 2);
-      ctx.fillStyle = isWorst ? '#991b1b' : 'rgba(239, 68, 68, 0.8)';
+      ctx.fillStyle = isWorst ? '#991b1b' : 'rgba(239, 68, 68, 0.82)';
       ctx.fill();
       ctx.strokeStyle = '#ffffff'; ctx.lineWidth = isWorst ? 2.2 : 1; ctx.stroke();
 
       if (isWorst) {{
         ctx.fillStyle = '#7f1d1d'; ctx.font = 'bold 11.5px sans-serif'; ctx.textAlign = 'left';
-        ctx.fillText(`Лимитирующий узел #${{p.clean_id}} (ΔP = ${{p.dp}} м)`, Math.min(px + 10, w - 240), Math.max(pad.t + 16, py - 8));
+        ctx.fillText(`Узел #${{p.clean_id}} (ΔP = ${{p.dp}} м)`, Math.min(px + 10, w - 210), Math.max(pad.t + 16, py - 8));
       }}
     }});
 
@@ -1001,10 +1243,10 @@ function drawPressureBand(hoverPt = null) {{
     ctx.textAlign = 'right'; ctx.fillText(v.toFixed(0), pad.l - 6, y + 4);
   }}
   for (let i = 0; i < n; i += 4) {{
-    ctx.textAlign = 'center'; ctx.fillText(`${{i}}:00`, xOf(i), h - pad.b + 16);
+    ctx.textAlign = 'center'; ctx.fillText(`${{String(i).padStart(2, '0')}}:00`, xOf(i), h - pad.b + 16);
   }}
   ctx.fillStyle = '#0f172a'; ctx.font = 'bold 11.5px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('Время суток, ч', pad.l + pw / 2, h - 6);
+  ctx.fillText('Время суток, ч (коридор P10..P90 и медиана P50)', pad.l + pw / 2, h - 6);
   ctx.save(); ctx.translate(15, pad.t + ph / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText('Свободный напор P = H − Z, м', 0, 0); ctx.restore();
 
@@ -1048,7 +1290,7 @@ function drawBottlenecksChart(hoverPt = null) {{
     ctx.textAlign = 'center'; ctx.fillText(xv.toFixed(2), x, h - pad.b + 16);
   }}
   ctx.fillStyle = '#0f172a'; ctx.font = 'bold 11.5px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('Скорость потока в трубе V, м/с', pad.l + pw / 2, h - 6);
+  ctx.fillText('Скорость потока в трубе V, м/с (клик по точке → таблица труб)', pad.l + pw / 2, h - 6);
   ctx.save(); ctx.translate(15, pad.t + ph / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText('Удельные потери напора i, м/км', 0, 0); ctx.restore();
 
@@ -1060,7 +1302,7 @@ function drawBottlenecksChart(hoverPt = null) {{
     ctx.strokeStyle = '#fff'; ctx.lineWidth = isTop ? 2 : 1; ctx.stroke();
     if (isTop) {{
       ctx.fillStyle = '#991b1b'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left';
-      ctx.fillText(`Лидер потерь #${{p.clean_id}}: i=${{p.i}} м/км (V=${{p.v}} м/с)`, Math.min(px + 10, w - 250), Math.max(pad.t + 16, py - 8));
+      ctx.fillText(`Участок #${{p.clean_id}}: i=${{p.i}} м/км (V=${{p.v}} м/с)`, Math.min(px + 10, w - 240), Math.max(pad.t + 16, py - 8));
     }}
   }});
 
@@ -1070,7 +1312,16 @@ function drawBottlenecksChart(hoverPt = null) {{
   canvas._meta = {{ pad, pw, ph, maxX, maxY, pts, xOf, yOf }};
 }}
 
-function drawStagnationChart() {{
+const VELOCITY_BIN_TO_FILTER = {{
+  'Перекрыты / Поток = 0 (задвижка)': 'closed',
+  'Низкие скорости (< 0.10 м/с)': 'stagnant',
+  'Умеренные (0.10–0.50 м/с)': 'vel_moderate',
+  'Оптимум (0.50–1.50 м/с)': 'vel_optimum',
+  'Повышенные (1.50–5.00 м/с)': 'vel_elevated',
+  'Большая скорость (>= 5.00 м/с)': 'vel_extreme'
+}};
+
+function drawStagnationChart(hoverIdx = hoveredPieSliceIdx) {{
   const canvas = document.getElementById('stagnationCanvas');
   const {{ ctx, w, h }} = setupHiDPICanvas(canvas);
   const vBins = DATA.velocity_bins || {{}};
@@ -1079,21 +1330,45 @@ function drawStagnationChart() {{
 
   const colors = ['#94a3b8', '#f59e0b', '#38bdf8', '#10b981', '#6366f1', '#ef4444'];
   const total = rawItems.reduce((acc, [_, v]) => acc + v, 0);
-  const items = rawItems.map(([label, val], i) => ({{ label, val, ratio: total > 0 ? val / total : 0, color: colors[i % colors.length] }}));
+  const items = rawItems.map(([label, val], i) => ({{
+    idx: i,
+    label,
+    val,
+    ratio: total > 0 ? val / total : 0,
+    color: colors[i % colors.length],
+    filterCode: VELOCITY_BIN_TO_FILTER[label] || 'all'
+  }}));
 
-  const cx = Math.round(w * 0.27), cy = Math.round(h * 0.50);
-  const outerR = Math.max(45, Math.min(cx - 20, cy - 20, 105)), innerR = Math.round(outerR * 0.56);
+  const cx = Math.round(w * 0.25), cy = Math.round(h * 0.50);
+  const outerR = Math.max(48, Math.min(cx - 24, cy - 24, 108)), innerR = Math.round(outerR * 0.55);
   let curAngle = -Math.PI / 2;
   const slices = [];
 
-  items.forEach(it => {{
+  items.forEach((it, idx) => {{
     const sweep = it.ratio * Math.PI * 2;
-    slices.push({{ ...it, startA: curAngle, endA: curAngle + sweep }});
+    const midA = curAngle + sweep / 2;
+    const isHovered = idx === hoverIdx;
+    const offset = isHovered ? 9 : 0;
+    const scx = cx + Math.cos(midA) * offset;
+    const scy = cy + Math.sin(midA) * offset;
+    slices.push({{ ...it, startA: curAngle, endA: curAngle + sweep, midA }});
+
     if (it.val > 0) {{
-      ctx.beginPath(); ctx.arc(cx, cy, outerR, curAngle, curAngle + sweep);
-      ctx.arc(cx, cy, innerR, curAngle + sweep, curAngle, true);
-      ctx.closePath(); ctx.fillStyle = it.color; ctx.fill();
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.save();
+      if (isHovered) {{
+        ctx.shadowColor = 'rgba(15, 23, 42, 0.22)';
+        ctx.shadowBlur = 12;
+      }}
+      ctx.beginPath();
+      ctx.arc(scx, scy, isHovered ? outerR + 3 : outerR, curAngle, curAngle + sweep);
+      ctx.arc(scx, scy, innerR, curAngle + sweep, curAngle, true);
+      ctx.closePath();
+      ctx.fillStyle = it.color;
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = isHovered ? 2.5 : 1.5;
+      ctx.stroke();
+      ctx.restore();
     }}
     curAngle += sweep;
   }});
@@ -1102,16 +1377,31 @@ function drawStagnationChart() {{
   ctx.fillText(total.toLocaleString('ru-RU'), cx, cy + 2);
   ctx.font = '11px sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText('труб всего', cx, cy + 18);
 
-  const legX = Math.round(w * 0.52), legStartY = Math.max(16, Math.round(cy - (items.length * 26) / 2));
+  const legX = Math.round(w * 0.48), legStartY = Math.max(16, Math.round(cy - (items.length * 28) / 2));
+  const legendBoxes = [];
   items.forEach((it, idx) => {{
-    const ly = legStartY + idx * 26;
-    ctx.beginPath(); ctx.arc(legX + 6, ly + 6, 5, 0, Math.PI * 2); ctx.fillStyle = it.color; ctx.fill();
-    ctx.font = '12px sans-serif'; ctx.fillStyle = '#334155'; ctx.textAlign = 'left';
-    ctx.fillText(it.label, legX + 16, ly + 10);
-    ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = '#0f172a'; ctx.textAlign = 'right';
-    ctx.fillText(`${{it.val}} (${{(it.ratio * 100).toFixed(1)}}%)`, w - 12, ly + 10);
+    const ly = legStartY + idx * 28;
+    const isHovered = idx === hoverIdx;
+    const boxW = w - legX - 8;
+    legendBoxes.push({{ idx, x: legX - 6, y: ly - 4, w: boxW, h: 24, item: it }});
+
+    if (isHovered) {{
+      ctx.fillStyle = '#e0f2fe';
+      ctx.beginPath();
+      ctx.roundRect(legX - 6, ly - 4, boxW, 24, 6);
+      ctx.fill();
+    }}
+    ctx.beginPath(); ctx.arc(legX + 6, ly + 8, isHovered ? 6.5 : 5, 0, Math.PI * 2); ctx.fillStyle = it.color; ctx.fill();
+    ctx.font = isHovered ? 'bold 12px sans-serif' : '12px sans-serif';
+    ctx.fillStyle = isHovered ? '#0369a1' : '#334155';
+    ctx.textAlign = 'left';
+    ctx.fillText(it.label, legX + 18, ly + 12);
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillStyle = isHovered ? '#0369a1' : '#0f172a';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${{it.val}} (${{(it.ratio * 100).toFixed(1)}}%) ↗`, w - 16, ly + 12);
   }});
-  canvas._meta = {{ cx, cy, outerR, innerR, slices }};
+  canvas._meta = {{ cx, cy, outerR, innerR, slices, legendBoxes }};
 }}
 
 function drawValvesChart(hoverPt = null) {{
@@ -1135,11 +1425,13 @@ function drawValvesChart(hoverPt = null) {{
     ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
     ctx.textAlign = 'right'; ctx.fillText(v.toFixed(0), pad.l - 6, y + 4);
   }}
-  for (let i = 0; i < n; i += 4) {{
-    ctx.textAlign = 'center'; ctx.fillText((DATA.step_labels || [])[i] || `R${{i}}`, xOf(i), h - pad.b + 16);
+  const stepStride = Math.max(1, Math.floor(n / 6));
+  for (let i = 0; i < n; i += stepStride) {{
+    ctx.textAlign = 'center';
+    ctx.fillText((DATA.hours_labels || [])[i] || `${{i}}:00`, xOf(i), h - pad.b + 16);
   }}
   ctx.fillStyle = '#0f172a'; ctx.font = 'bold 11.5px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('Расчетный временной шаг (R0 ... RN)', pad.l + pw / 2, h - 6);
+  ctx.fillText('Время суток, ЧЧ:ММ', pad.l + pw / 2, h - 6);
   ctx.save(); ctx.translate(15, pad.t + ph / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText('Поток через клапан Q, м³/ч', 0, 0); ctx.restore();
 
@@ -1161,14 +1453,14 @@ function drawDiurnalFlows(hoverPt = null) {{
   if (!canvas) return;
   const dem = DATA.diurnal_demand_m3_h || [], pmp = DATA.diurnal_pump_flow_m3_h || [];
   const series = [];
-  if (dem.some(v => v > 0)) series.push({{ name: 'Потребление сети', data: dem, color: '#0284c7' }});
-  if (pmp.some(v => v > 0)) series.push({{ name: 'Подача насосов', data: pmp, color: '#0d9488' }});
+  if (dem.some(v => v > 0)) series.push({{ name: 'Потребление сети (абоненты)', data: dem, color: '#0284c7', dashed: false }});
+  if (pmp.some(v => v > 0)) series.push({{ name: 'Подача насосных станций', data: pmp, color: '#0d9488', dashed: true }});
   if (!series.length) return;
 
   const {{ ctx, w, h }} = setupHiDPICanvas(canvas);
-  const pad = {{ l: 60, r: 24, t: 26, b: 42 }};
+  const pad = {{ l: 64, r: 24, t: 36, b: 42 }};
   const pw = w - pad.l - pad.r, ph = h - pad.t - pad.b;
-  const maxY = Math.max(...series.flatMap(s => s.data), 1) * 1.15;
+  const maxY = Math.max(...series.flatMap(s => s.data), 1) * 1.16;
   const n = series[0].data.length;
   const xOf = i => pad.l + (i / Math.max(n - 1, 1)) * pw;
   const yOf = v => pad.t + ph - (Math.max(0, v) / maxY) * ph;
@@ -1180,138 +1472,447 @@ function drawDiurnalFlows(hoverPt = null) {{
     ctx.textAlign = 'right'; ctx.fillText(v.toFixed(0), pad.l - 6, y + 4);
   }}
   for (let i = 0; i < n; i += 4) {{
-    ctx.textAlign = 'center'; ctx.fillText(`${{i}}:00`, xOf(i), h - pad.b + 16);
+    ctx.textAlign = 'center'; ctx.fillText(`${{String(i).padStart(2, '0')}}:00`, xOf(i), h - pad.b + 16);
   }}
   ctx.fillStyle = '#0f172a'; ctx.font = 'bold 11.5px sans-serif'; ctx.textAlign = 'center';
   ctx.fillText('Время суток, ч', pad.l + pw / 2, h - 6);
   ctx.save(); ctx.translate(15, pad.t + ph / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText('Объемный расход Q, м³/ч', 0, 0); ctx.restore();
 
+  // Встроенная легенда на самом полотне графика для однозначного чтения
+  let legCursorX = pad.l;
   series.forEach(s => {{
-    ctx.strokeStyle = s.color; ctx.lineWidth = 2.5; ctx.beginPath();
+    ctx.save();
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 3;
+    if (s.dashed) ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(legCursorX, 14);
+    ctx.lineTo(legCursorX + 24, 14);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = s.color;
+    ctx.beginPath();
+    ctx.arc(legCursorX + 12, 14, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.font = 'bold 11.5px sans-serif';
+    ctx.fillStyle = '#0f172a';
+    ctx.textAlign = 'left';
+    ctx.fillText(s.name, legCursorX + 30, 18);
+    legCursorX += ctx.measureText(s.name).width + 52;
+  }});
+
+  series.forEach(s => {{
+    ctx.save();
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 2.6;
+    if (s.dashed) ctx.setLineDash([7, 4]);
+    ctx.beginPath();
     s.data.forEach((v, i) => {{ if (i === 0) ctx.moveTo(xOf(i), yOf(v)); else ctx.lineTo(xOf(i), yOf(v)); }});
     ctx.stroke();
+    ctx.restore();
+
+    s.data.forEach((v, i) => {{
+      if (i % 3 === 0) {{
+        ctx.fillStyle = s.color;
+        ctx.beginPath();
+        ctx.arc(xOf(i), yOf(v), 3, 0, Math.PI * 2);
+        ctx.fill();
+      }}
+    }});
   }});
+
   if (hoverPt) {{
     drawCrosshairProjections(ctx, pad, pw, ph, hoverPt.px, hoverPt.py, hoverPt.xLabel, `${{hoverPt.yVal.toFixed(1)}}`);
   }}
   canvas._meta = {{ pad, pw, ph, maxY, n, dem, pmp, xOf, yOf }};
 }}
 
-function generateLiveAnalysis(kind) {{
+// Потоковый / пошаговый вывод ИИ-ответа (эффект живого общения с ИИ)
+function streamHTMLIntoBox(boxEl, htmlContent, kind) {{
+  boxEl.style.display = 'block';
+  boxEl.innerHTML = `<div style="color:#0284c7;font-weight:600;font-size:12.5px;margin-bottom:6px;">ИИ-аналитик формирует инженерное заключение...</div><div class="stream-target"></div>`;
+  const target = boxEl.querySelector('.stream-target');
+  const tokens = htmlContent.split(/(<[^>]+>|\\s+)/);
+  let i = 0;
+  let acc = '';
+  const timer = setInterval(() => {{
+    const step = Math.min(tokens.length, i + 8);
+    for (; i < step; i++) acc += tokens[i];
+    target.innerHTML = acc;
+    if (i >= tokens.length) {{
+      clearInterval(timer);
+      const header = boxEl.querySelector('div');
+      if (header) header.innerHTML = `Инженерный вывод ИИ (актуально для текущего состояния графика):`;
+      const followup = document.createElement('div');
+      followup.className = 'ai-chat-followup';
+      followup.innerHTML = `
+        <input type="text" placeholder="Задать уточняющий вопрос ИИ по этому графику или объекту..." onkeydown="if(event.key==='Enter')askCustomAIQuestion('${{kind}}', this)">
+        <button type="button" class="btn-subtle" onclick="askCustomAIQuestion('${{kind}}', this.previousElementSibling)">Спросить ИИ</button>
+      `;
+      boxEl.appendChild(followup);
+    }}
+  }}, 18);
+}}
+
+async function tryCallLocalLLM(systemPrompt, userPrompt) {{
+  const endpoints = [];
+  if (window.LOCAL_LLM_URL) endpoints.push(window.LOCAL_LLM_URL);
+  endpoints.push('http://127.0.0.1:8080/v1/chat/completions');
+  for (const url of endpoints) {{
+    try {{
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), 2200);
+      const resp = await fetch(url, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          model: 'local',
+          messages: [
+            {{ role: 'system', content: systemPrompt }},
+            {{ role: 'user', content: userPrompt }}
+          ],
+          max_tokens: 600,
+          temperature: 0.3
+        }}),
+        signal: ctrl.signal
+      }});
+      clearTimeout(id);
+      if (resp.ok) {{
+        const data = await resp.json();
+        const txt = data?.choices?.[0]?.message?.content;
+        if (txt) return txt;
+      }}
+    }} catch (_e) {{}}
+  }}
+  return null;
+}}
+
+function buildContextExactAnalysisHTML(kind) {{
+  if (kind === 'qh') {{
+    const curves = DATA.qh_curves || [];
+    const cur = curves[currentQHIndex] || curves[0] || {{}};
+    const pumpRow = (DATA.tables.pumps || []).find(p => String(p.clean_id) === String(cur.clean_id)) || cur;
+    const isBh = Boolean(cur.is_borehole);
+    const isAct = Boolean(cur.active);
+    const snId = pumpRow.start_node || cur.start_node || '—';
+    const enId = pumpRow.end_node || cur.end_node || '—';
+    const qWork = cur.operating_q_mean ?? 0;
+    const qNom = cur.q_nominal_m3_h ?? 0;
+    const hWork = cur.operating_h_est ?? 0;
+    const hNom = cur.h_nominal_m ?? 0;
+    const ratioPct = qNom > 0 ? Math.round((qWork / qNom) * 100) : 0;
+
+    const enProps = DATA.node_props[enId] || DATA.node_props['c' + enId] || {{}};
+    const snProps = DATA.node_props[snId] || DATA.node_props['e' + snId] || DATA.node_props['c' + snId] || {{}};
+    const colP = enProps.p_mean ?? enProps.p_max ?? pumpRow.collector_pressure_m ?? '—';
+    const colZ = enProps.z ?? pumpRow.collector_elevation_m ?? '—';
+    const srcZ = snProps.z ?? pumpRow.source_head_m ?? '—';
+    const nbPipes = (enProps.connected_pipe_ids || []).map(id => `<button type="button" class="object-link" data-map-id="${{id}}">#${{id}}</button>`).join(', ');
+
+    if (qhShowAllMode) {{
+      const actCnt = curves.filter(c => c.active).length;
+      const bhCnt = curves.filter(c => c.is_borehole).length;
+      return `<strong>Сводный ИИ-разбор парка насосных агрегатов (${{curves.length}} кривых Q-H):</strong><br>
+      • <b>Структура парка:</b> Скважинных агрегатов 1-го подъема — <b>${{bhCnt}} шт.</b>, сетевых/повысительных — <b>${{curves.length - bhCnt}} шт.</b> (в работе: ${{actCnt}} шт., в резерве: ${{curves.length - actCnt}} шт.).<br>
+      • <b>Навигация:</b> Выберите конкретный насос в выпадающем списке выше или нажмите <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pumps', 'imbalance')">Отфильтровать проблемные насосы в таблице ↗</button> для адресного разбора его приемного коллектора и водоводов.`;
+    }}
+
+    if (!isAct || qWork <= 0.001) {{
+      return `<strong>ИИ-диагностика агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
+      • <b>Фактическое состояние:</b> Насос находится в резерве / отключен (подача <b>Q = 0 м³/ч</b>, развиваемый напор <b>H = 0 м</b>; паспортный номинал кривой <code>${{cur.curve_id}}</code>: Qном = ${{qNom}} м³/ч, Hном = ${{hNom}} м).<br>
+      • <b>Состояние приемного узла коллектора <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button>:</b> Отметка Z = ${{colZ}} м, фактическое давление в узле P = <b>${{colP}} м</b>${{nbPipes ? ` (отходящие участки: ${{nbPipes}})` : ''}}.<br>
+      • <b>Мероприятие в ПК «Аквабит»:</b> Если агрегат <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> должен работать по технологическому графику, проверьте его статус в <code>Поток Насос.csv</code> и открытость отходящего участка за узлом <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button>.`;
+    }}
+
+    return `<strong>ИИ-диагностика работающего агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
+    • <b>Рабочая точка на кривой <code>${{cur.curve_id}}</code>:</b> Подача <b>Q = ${{qWork}} м³/ч</b> (${{ratioPct}}% от Qном = ${{qNom}} м³/ч), развиваемый напор <b>H = ${{hWork}} м</b> (Hном = ${{hNom}} м).<br>
+    • <b>Привязка к смежным узлам сети:</b> Входной узел ${{isBh ? '(Источник/скважина)' : ''}} <button type="button" class="object-link" data-map-id="${{snId}}">#${{snId}}</button> (H/Z = ${{srcZ}} м) → приемный напорный узел коллектора <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button> (Z = ${{colZ}} м, давление <b>Pвых = ${{colP}} м</b>)${{nbPipes ? `, смежные водоводы: ${{nbPipes}}` : ''}}.<br>
+    • <b>Инженерное заключение и действия в Аквабит:</b> ${{formatTextWithObjectButtons(pumpRow.advice || cur.diagnostic_advice)}}`;
+  }}
+
+  if (kind === 'pressure') {{
+    const pts = DATA.deficit_nodes_points || [];
+    const worst = pts[0] || {{}};
+    const wProps = DATA.node_props[worst.node_id] || DATA.node_props[worst.clean_id] || {{}};
+    const nbLinks = (wProps.connected_pipe_ids || []).map(id => `<button type="button" class="object-link" data-map-id="${{id}}">#${{id}}</button>`).join(', ');
+    return `<strong>ИИ-разбор распределения свободного напора (${{pressureChartMode === 'points' ? 'Режим точек дефицита' : 'Суточный коридор 24 ч'}}):</strong><br>
+    • <b>Диктующий узел депрессии:</b> Абонент <button type="button" class="object-link" data-map-id="${{worst.clean_id}}">#${{worst.clean_id || '—'}}</button> (${{worst.floors ?? 1}} эт., Z = ${{worst.z ?? '—'}} м) имеет минимальный свободный напор <b>Pсвоб = ${{worst.p_free ?? '—'}} м</b> при требуемом Pтреб = ${{worst.p_req ?? '—'}} м (дефицит <b>ΔP = ${{worst.dp ?? 0}} м</b>).<br>
+    • <b>Смежные подводящие участки к узлу #${{worst.clean_id}}:</b> ${{nbLinks || 'уточните на карте'}}.<br>
+    • <b>Переход к выборке:</b> <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'deficit')">Отфильтровать все ${{pts.length}} узлов с дефицитом в таблице ↗</button> или <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'data_error')">Показать узлы с вакуумом P &lt; -3.0 м ↗</button>.`;
+  }}
+
+  if (kind === 'bottlenecks') {{
+    const pts = DATA.bottleneck_pipes_points || [];
+    const top = pts[0] || {{}};
+    const totBneck = DATA.bottleneck_pipes_total_count || pts.length;
+    return `<strong>ИИ-разбор гидравлических узких мест (всего проблемных участков: ${{totBneck}} шт.):</strong><br>
+    • <b>Главный дроссель сети:</b> Участок <button type="button" class="object-link" data-map-id="${{top.clean_id}}">#${{top.clean_id || '—'}}</button> между узлами <button type="button" class="object-link" data-map-id="${{top.sn}}">#${{top.sn || '—'}}</button> и <button type="button" class="object-link" data-map-id="${{top.en}}">#${{top.en || '—'}}</button> (D = ${{top.d ?? 0}} мм, L = ${{top.l ?? 0}} м, C = ${{top.c ?? '—'}}) теряет <b>${{top.i ?? 0}} м/км</b> при скорости <b>${{top.v ?? 0}} м/с</b> и расходе ${{top.q ?? 0}} м³/ч.<br>
+    • <b>Причина и мероприятие в Аквабит:</b> ${{formatTextWithObjectButtons(top.advice)}}<br>
+    • <b>Быстрый фильтр:</b> <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'bottlenecks')">Показать и отсортировать узкие места в таблице труб ↗</button>.`;
+  }}
+
+  if (kind === 'stagnation') {{
+    const vBins = DATA.velocity_bins || {{}};
+    const closedCnt = vBins['Перекрыты / Поток = 0 (задвижка)'] || 0;
+    const stagCnt = vBins['Низкие скорости (< 0.10 м/с)'] || 0;
+    const optCnt = vBins['Оптимум (0.50–1.50 м/с)'] || 0;
+    return `<strong>ИИ-разбор распределения скоростей потока по участкам сети:</strong><br>
+    • <b>Оптимальное ядро (0.50–1.50 м/с):</b> <b>${{optCnt}} участков</b> обеспечивают нормативный гидравлический уклон без застоя.<br>
+    • <b>Перекрытые задвижками участки (Q = 0):</b> <b>${{closedCnt}} шт.</b> (<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'closed')">Отфильтровать в таблице ↗</button>) — проверить необходимость открытия для закольцовки зон депрессии.<br>
+    • <b>Малопроточные зоны (&lt; 0.10 м/с):</b> <b>${{stagCnt}} шт.</b> (<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'stagnant')">Отфильтровать в таблице ↗</button>) — рекомендуется перераспределение потоков и ревизия тупиковых линий.`;
+  }}
+
+  if (kind === 'valves') {{
+    const vs = DATA.tables.valves || [];
+    const topV = vs[0] || {{}};
+    return `<strong>ИИ-разбор работы регулирующих клапанов (PRV/PSV/FCV):</strong><br>
+    • <b>Интенсивность регулирования:</b> Клапан <button type="button" class="object-link" data-map-id="${{topV.clean_id}}">#${{topV.clean_id || '—'}}</button> (${{topV.type_code || 'PRV'}}, уставка ${{topV.setting ?? '—'}}) между узлами <button type="button" class="object-link" data-map-id="${{topV.start_node}}">#${{topV.start_node || '—'}}</button> и <button type="button" class="object-link" data-map-id="${{topV.end_node}}">#${{topV.end_node || '—'}}</button> изменяет расход от ${{topV.flow_min ?? 0}} до ${{topV.flow_max ?? 0}} м³/ч (амплитуда ΔQ = ${{topV.flow_swing ?? 0}} м³/ч).`;
+  }}
+
+  if (kind === 'diurnal') {{
+    const dem = DATA.diurnal_demand_m3_h || [], pmp = DATA.diurnal_pump_flow_m3_h || [];
+    const maxDem = Math.max(...dem, 0), maxPmp = Math.max(...pmp, 0);
+    return `<strong>ИИ-разбор суточного баланса подачи насосов и водопотребления (24 ч):</strong><br>
+    • <b>Пиковые нагрузки:</b> Максимальное часовое потребление абонентов (синяя линия) достигает <b>${{maxDem.toFixed(1)}} м³/ч</b>, пиковая подача насосных станций (изумрудная пунктирная линия) — <b>${{maxPmp.toFixed(1)}} м³/ч</b>.<br>
+    • <b>Инженерный вывод:</b> Разница между подачей насосов и потреблением сети аккумулируется в резервуарах чистой воды (РЧВ) и компенсирует часы максимального водоразбора.`;
+  }}
+  return '';
+}}
+
+async function generateLiveAnalysis(kind) {{
   const mapIds = {{
     qh: 'qhAnalysis', pressure: 'pressureAnalysis', bottlenecks: 'bottlenecksAnalysis',
     stagnation: 'stagnationAnalysis', valves: 'valvesAnalysis', diurnal: 'diurnalAnalysis'
   }};
   const box = document.getElementById(mapIds[kind]);
   if (!box) return;
-  box.style.display = 'block';
 
-  let text = '';
-  if (kind === 'qh') {{
-    const curves = DATA.qh_curves || [];
-    const cur = curves[currentQHIndex] || curves[0] || {{}};
-    const bhCnt = curves.filter(c => c.is_borehole).length;
-    text = `<strong>Полная интерпретация характеристик Q-H и режимов насосов:</strong><br>
-    • <b>Что хорошо:</b> В модели идентифицировано <b>${{bhCnt}}</b> скважинных насосов 1-го подъема (начальный узел — Источник) и <b>${{curves.length - bhCnt}}</b> сетевых агрегатов. Зеленый коридор (75–115% Qном) обозначает зону максимального КПД (BEP).<br>
-    • <b>Выбранный агрегат #${{cur.clean_id || '—'}} (${{cur.pump_kind || 'Насос'}}):</b> Фактическая подача Q = <b>${{cur.operating_q_mean ?? 0}} м³/ч</b>, напор H = <b>${{cur.operating_h_est ?? 0}} м</b>.<br>
-    • <b>Диагностика по правилам гидравлики:</b> ${{cur.diagnostic_advice || 'Штатный режим.'}}<br>
-    • <b>Инженерный вывод:</b> У скважинных насосов нет входных задвижек (проверяется уровень воды в скважине и напорный оголовок), а при перегрузке любого насоса подачу снижают уменьшением давления на выходе.`;
-  }} else if (kind === 'pressure') {{
-    const pts = DATA.deficit_nodes_points || [];
-    const worst = pts[0] || {{}};
-    text = `<strong>Полная интерпретация графика свободного напора и дефицитов:</strong><br>
-    • <b>Что показывает график:</b> Все <b>${{pts.length}}</b> абонентских узлов с нехваткой давления (ΔP &lt; 0) нанесены красными точками. Лимитирующий узел <button class="object-link" data-map-id="${{worst.node_id}}">${{worst.clean_id || '—'}}</button> имеет отклонение <b>ΔP = ${{worst.dp ?? 0}} м</b> при отметке Z = ${{worst.z ?? 0}} м.<br>
-    • <b>Что хорошо:</b> Узлы выше линии ΔP = 0 м полностью обеспечены нормативным напором для своей этажности.<br>
-    • <b>Чем грозит дефицит:</b> В часы пикового водоразбора верхние этажи зданий в красной зоне останутся без воды.<br>
-    • <b>Как исправить:</b> Разгрузить подводящие лимитирующие водоводы либо повысить напор бустерной группой с установкой клапанов PRV в низинных зонах.`;
-  }} else if (kind === 'bottlenecks') {{
-    const pts = DATA.bottleneck_pipes_points || [];
-    const top = pts[0] || {{}};
-    text = `<strong>Полная интерпретация гидравлических узких мест:</strong><br>
-    • <b>Подтверждение аномалии:</b> На графике подсвечен лимитирующий участок <button class="object-link" data-map-id="${{top.pipe_id}}">${{top.clean_id || '—'}}</button> (диаметр D = ${{top.d ?? 0}} мм, C = ${{top.c ?? 100}}), на котором удельные потери достигают <b>${{top.i ?? 0}} м/км</b> при скорости <b>${{top.v ?? 0}} м/с</b>.<br>
-    • <b>Влияние на сеть:</b> Участки с градиентом потерь i ≥ 15–20 м/км работают как дроссельные шайбы, «съедая» напор насосных станций.<br>
-    • <b>Мероприятия:</b> Перекладка или параллельное дублирование участка #${{top.clean_id || '—'}} большим диаметром.`;
-  }} else if (kind === 'stagnation') {{
-    text = `<strong>Полная интерпретация круговой диаграммы скоростей:</strong><br>
-    • <b>Оптимальное ядро (0.50–1.50 м/с):</b> Гарантирует самоочищение труб без избыточных потерь на трение.<br>
-    • <b>Перекрытые участки (Q = 0) и малые скорости (&lt; 0.10 м/с):</b> Нулевой поток означает, что труба закрыта задвижкой. Длительное пребывание воды при скорости менее 0.10 м/с ведет к потере остаточного хлора и вторичному загрязнению.<br>
-    • <b>Мероприятия:</b> Открытие секущих задвижек для восстановления кольцевания и промывка тупиковых веток.`;
-  }} else if (kind === 'valves') {{
-    const vs = DATA.tables.valves || [];
-    const topV = vs[0] || {{}};
-    text = `<strong>Полная интерпретация работы регулирующих клапанов (PRV/PSV/FCV):</strong><br>
-    • <b>Назначение в схеме:</b> Клапан #${{topV.clean_id || '—'}} (${{topV.type_code || 'PRV'}}, уставка ${{topV.setting ?? '—'}}) гасит избыточный напор и стабилизирует расход между зонами (диапазон потока от ${{topV.flow_min ?? 0}} до ${{topV.flow_max ?? 0}} м³/ч).<br>
-    • <b>На что обратить внимание:</b> Резкие ступенчатые скачки потока на графике соответствуют моментам переключения насосных групп или заполнения РЧВ.`;
-  }} else if (kind === 'diurnal') {{
-    text = `<strong>Полная интерпретация суточного баланса подачи и потребления:</strong><br>
-    • <b>Соотношение мощностей:</b> Разрыв между установленной мощностью насосов и реальным расходом сети покрывается работой регулирующих емкостей РЧВ и графиком включения агрегатов.`;
-  }}
-
-  box.innerHTML = text;
+  const baseHtml = buildContextExactAnalysisHTML(kind);
+  const llmReply = await tryCallLocalLLM(
+    'Ты главный инженер-гидравлик ПК Аквабит. Дай точный, краткий вывод по конкретному объекту без шаблонных фраз.',
+    baseHtml.replace(/<[^>]+>/g, ' ')
+  );
+  const finalHtml = llmReply ? formatTextWithObjectButtons(llmReply).replace(/\\n/g, '<br>') + '<hr style="border:none;border-top:1px dashed #cbd5e1;margin:8px 0">' + baseHtml : baseHtml;
+  streamHTMLIntoBox(box, finalHtml, kind);
 }}
 
+async function askCustomAIQuestion(kind, inputEl) {{
+  if (!inputEl || !inputEl.value.trim()) return;
+  const q = inputEl.value.trim();
+  inputEl.value = '';
+  const mapIds = {{
+    qh: 'qhAnalysis', pressure: 'pressureAnalysis', bottlenecks: 'bottlenecksAnalysis',
+    stagnation: 'stagnationAnalysis', valves: 'valvesAnalysis', diurnal: 'diurnalAnalysis'
+  }};
+  const box = document.getElementById(mapIds[kind]);
+  if (!box) return;
+
+  const baseCtx = buildContextExactAnalysisHTML(kind).replace(/<[^>]+>/g, ' ');
+  const userBubble = document.createElement('div');
+  userBubble.style.cssText = 'margin-top:8px;padding:6px 10px;background:#e0f2fe;border-radius:6px;font-weight:600;color:#0369a1;';
+  userBubble.textContent = 'Вопрос: ' + q;
+  box.appendChild(userBubble);
+
+  const ansBubble = document.createElement('div');
+  ansBubble.style.cssText = 'margin-top:6px;padding:8px 10px;background:#fff;border:1px solid #cbd5e1;border-radius:6px;';
+  ansBubble.textContent = 'Анализ...';
+  box.appendChild(ansBubble);
+
+  const llmText = await tryCallLocalLLM(
+    'Ты инженер-аналитик ПК Аквабит. Отвечай строго по фактам контекста, указывай ID узлов и труб через #ID.',
+    `Контекст графика: ${{baseCtx}}\\nВопрос пользователя: ${{q}}`
+  );
+  if (llmText) {{
+    ansBubble.innerHTML = formatTextWithObjectButtons(llmText).replace(/\\n/g, '<br>');
+  }} else {{
+    ansBubble.innerHTML = `<b>Ответ ИИ по контексту:</b> По вашему запросу («${{q}}») ключевые параметры определяются состоянием связанных объектов: ${{baseCtx}}`;
+  }}
+}}
+
+// =================== УВЕДОМЛЕНИЯ И ПЕРЕХОДЫ ГРАФИК -> ТАБЛИЦА -> КАРТА ===================
 function onWarningClick(w) {{
   highlightedObjectId = w.focus_id || null;
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active-highlight'));
-  const targetEl = document.getElementById(w.target);
-  if (targetEl) {{
-    targetEl.classList.add('active-highlight');
-    targetEl.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-  }}
 
   if (w.kind === 'pressure_deficit') {{
     switchPressureMode('points');
-    generateLiveAnalysis('pressure');
-    switchTableTab('nodes', document.getElementById('tabBtn_nodes'), w.focus_id);
-  }} else if (w.kind === 'data_error' || w.kind === 'excess_pressure') {{
-    switchTableTab('nodes', document.getElementById('tabBtn_nodes'), w.focus_id);
   }} else if (w.kind === 'pipe_bottlenecks') {{
     drawBottlenecksChart();
-    generateLiveAnalysis('bottlenecks');
-    switchTableTab('pipes', document.getElementById('tabBtn_pipes'), w.focus_id);
   }} else if (w.kind === 'stagnation') {{
     drawStagnationChart();
-    generateLiveAnalysis('stagnation');
-    switchTableTab('pipes', document.getElementById('tabBtn_pipes'), w.focus_id);
   }} else if (w.kind === 'pump_qh') {{
-    const pIdx = (DATA.qh_curves || []).findIndex(c => c.clean_id === w.focus_id);
+    const pIdx = (DATA.qh_curves || []).findIndex(c => String(c.clean_id) === String(w.focus_id));
     if (pIdx >= 0) {{
       currentQHIndex = pIdx;
       document.getElementById('qhSelect').value = pIdx;
       qhShowAllMode = false;
       drawQHCurve(pIdx);
     }}
-    generateLiveAnalysis('qh');
-    switchTableTab('pumps', document.getElementById('tabBtn_pumps'), w.focus_id);
   }} else if (w.kind === 'valves') {{
     drawValvesChart();
-    generateLiveAnalysis('valves');
-    switchTableTab('valves', document.getElementById('tabBtn_valves'), w.focus_id);
+  }}
+
+  // Применяем автофильтр, сортировку и подсветку в таблице
+  if (w.table_tab) {{
+    applyTablePresetAndHighlight(
+      w.table_tab,
+      w.filter_preset || 'all',
+      w.sort_key || null,
+      w.sort_dir || 'asc',
+      w.highlight_ids || [],
+      w.focus_id || null,
+      w.title || ''
+    );
+  }}
+
+  const targetEl = document.getElementById(w.target || 'tablesSection');
+  if (targetEl) {{
+    targetEl.classList.add('active-highlight');
+    targetEl.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
   }}
 }}
 
+function applyQuickFilterFromAI(tab, preset) {{
+  const defaultSorts = {{
+    data_error: ['free_pressure_min_m', 'asc'],
+    deficit: ['margin_m', 'asc'],
+    excess: ['free_pressure_max_m', 'desc'],
+    bottlenecks: ['headloss_m_km', 'desc'],
+    closed: ['velocity_max_m_s', 'asc'],
+    stagnant: ['velocity_max_m_s', 'asc'],
+    underload: ['q_work', 'asc'],
+    overload: ['q_work', 'desc'],
+    imbalance: ['q_work', 'desc']
+  }};
+  const [sKey, sDir] = defaultSorts[preset] || [null, 'asc'];
+  applyTablePresetAndHighlight(tab, preset, sKey, sDir, [], null, `Фильтр ИИ: ${{preset}}`);
+  document.getElementById('tablesSection').scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+}}
+
+function jumpToTableRowFromChart(tab, cleanId) {{
+  if (!cleanId) return;
+  highlightedObjectId = String(cleanId);
+  currentTable = tab;
+  currentFilterPreset = 'all';
+  currentSearch = '';
+  document.getElementById('tableSearchInput').value = '';
+  highlightIdsSet = new Set([String(cleanId)]);
+  highlightRowId = String(cleanId);
+
+  document.querySelectorAll('.table-tab-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById('tabBtn_' + tab);
+  if (btn) btn.classList.add('active');
+
+  renderTableFilters();
+  renderTable();
+
+  const tablesSec = document.getElementById('tablesSection');
+  if (tablesSec) tablesSec.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+
+  setTimeout(() => {{
+    const focusedTr = document.querySelector('#mainTableBody tr.row-focused, #mainTableBody tr.row-highlighted');
+    if (focusedTr) focusedTr.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+  }}, 250);
+}}
+
+function jumpFromCurrentPumpToTable() {{
+  const curves = DATA.qh_curves || [];
+  const cur = curves[currentQHIndex] || curves[0];
+  if (cur && cur.clean_id) jumpToTableRowFromChart('pumps', cur.clean_id);
+}}
+
+// =================== ИНТЕРАКТИВНАЯ КАРТА (ФИКС ЗУМА + МИГАНИЕ + ТАЙМЛАЙН) ===================
 const networkCanvas = document.getElementById('networkMap');
 const networkGeo = DATA.geo || {{ nodes: {{}}, links: [] }};
-const networkView = {{ scale: 1, tx: 0, ty: 0, baseScale: 1, selectedPts: null, dragging: false }};
+const networkView = {{
+  scale: 1,
+  tx: 0,
+  ty: 0,
+  baseScale: 1,
+  selectedPts: null,
+  dragging: false,
+  dragStartX: 0,
+  dragStartY: 0,
+  pulsePhase: 0,
+  animFrameId: null
+}};
 
-function mapSize() {{ return {{ w: Math.max(1, networkCanvas.clientWidth), h: Math.max(1, networkCanvas.clientHeight) }}; }}
-function screenPoint(p) {{ return [p[0] * networkView.scale + networkView.tx, networkView.ty - p[1] * networkView.scale]; }}
+function mapSize() {{
+  return {{
+    w: Math.max(320, networkCanvas.parentElement?.clientWidth || networkCanvas.clientWidth || 800),
+    h: Math.max(300, networkCanvas.parentElement?.clientHeight || networkCanvas.clientHeight || 500)
+  }};
+}}
+
+function screenPoint(p) {{
+  return [p[0] * networkView.scale + networkView.tx, networkView.ty - p[1] * networkView.scale];
+}}
+
+function zoomMapAtPoint(factor, centerX, centerY) {{
+  const oldScale = networkView.scale;
+  const minScale = Math.max(1e-6, networkView.baseScale * 0.25);
+  const maxScale = Math.max(100, networkView.baseScale * 250);
+  const newScale = Math.max(minScale, Math.min(maxScale, oldScale * factor));
+  const ratio = newScale / oldScale;
+  networkView.tx = centerX - (centerX - networkView.tx) * ratio;
+  networkView.ty = centerY - (centerY - networkView.ty) * ratio;
+  networkView.scale = newScale;
+  redrawMap();
+}}
+
+function ensurePulseAnimation() {{
+  if (networkView.animFrameId) return;
+  function tick() {{
+    if (!networkView.selectedPts) {{
+      networkView.animFrameId = null;
+      return;
+    }}
+    networkView.pulsePhase = (networkView.pulsePhase + 0.08) % (Math.PI * 2);
+    redrawMap();
+    networkView.animFrameId = requestAnimationFrame(tick);
+  }}
+  networkView.animFrameId = requestAnimationFrame(tick);
+}}
 
 function redrawMap() {{
-  const {{ w, h }} = mapSize(), dpr = window.devicePixelRatio || 1;
-  networkCanvas.width = Math.round(w * dpr); networkCanvas.height = Math.round(h * dpr);
+  const {{ w, h }} = mapSize();
+  const dpr = window.devicePixelRatio || 1;
+  const targetW = Math.round(w * dpr), targetH = Math.round(h * dpr);
+  if (networkCanvas.width !== targetW || networkCanvas.height !== targetH) {{
+    networkCanvas.width = targetW;
+    networkCanvas.height = targetH;
+  }}
   const ctx = networkCanvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#f8fafc';
+  ctx.fillRect(0, 0, w, h);
 
-  ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 0.9;
-  for (const [id, pts] of (networkGeo.links || [])) {{
+  // Отрисовка трубопроводов с отсечением невидимых сегментов (предотвращает переполнение Canvas при большом зуме)
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 1.0;
+  ctx.beginPath();
+  for (const [_id, pts] of (networkGeo.links || [])) {{
     if (!pts || pts.length < 2) continue;
-    ctx.beginPath();
-    pts.forEach((p, i) => {{ const [x, y] = screenPoint(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }});
-    ctx.stroke();
+    let prevX = null, prevY = null;
+    for (let i = 0; i < pts.length; i++) {{
+      const [x, y] = screenPoint(pts[i]);
+      if (prevX !== null) {{
+        const inBounds = !(
+          (prevX < -200 && x < -200) || (prevX > w + 200 && x > w + 200) ||
+          (prevY < -200 && y < -200) || (prevY > h + 200 && y > h + 200)
+        );
+        if (inBounds) {{
+          ctx.moveTo(prevX, prevY);
+          ctx.lineTo(x, y);
+        }}
+      }}
+      prevX = x; prevY = y;
+    }}
   }}
+  ctx.stroke();
 
   const hrPressures = DATA.node_hourly_pressures || {{}};
   const badSet = new Set((networkGeo.bad_nodes || []).map(clean_object_id));
@@ -1319,115 +1920,272 @@ function redrawMap() {{
   const tankSet = new Set(networkGeo.tanks || []);
 
   for (const [rawId, p] of Object.entries(networkGeo.nodes || {{}})) {{
+    if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) continue;
     const [x, y] = screenPoint(p);
-    if (x < -10 || x > w + 10 || y < -10 || y > h + 10) continue;
+    if (x < -12 || x > w + 12 || y < -12 || y > h + 12) continue;
     const cid = clean_object_id(rawId);
-    const hrArr = hrPressures[rawId] || hrPressures['c' + cid];
-    const pNow = (hrArr && hrArr[currentTimelineHour] !== undefined) ? hrArr[currentTimelineHour] : null;
+    const hrArr = hrPressures[rawId] || hrPressures['c' + cid] || hrPressures[cid];
+    const pNow = (hrArr && hrArr[currentTimelineStep] !== undefined) ? hrArr[currentTimelineStep] : null;
 
     ctx.beginPath();
     if (srcSet.has(cid)) {{
       ctx.fillStyle = '#059669'; ctx.arc(x, y, 6, 0, Math.PI * 2);
     }} else if (tankSet.has(cid)) {{
       ctx.fillStyle = '#0284c7'; ctx.rect(x - 5, y - 5, 10, 10);
-    }} else if (badSet.has(cid) || (pNow !== null && pNow < 0)) {{
-      ctx.fillStyle = '#ef4444'; ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    }} else if ((pNow !== null && pNow < 0) || badSet.has(cid)) {{
+      ctx.fillStyle = '#ef4444'; ctx.arc(x, y, 3.6, 0, Math.PI * 2);
     }} else {{
-      ctx.fillStyle = '#64748b'; ctx.arc(x, y, 2.0, 0, Math.PI * 2);
+      ctx.fillStyle = '#64748b'; ctx.arc(x, y, 2.1, 0, Math.PI * 2);
     }}
     ctx.fill();
   }}
 
-  if (networkView.selectedPts) {{
-    ctx.strokeStyle = '#f59e0b'; ctx.fillStyle = '#f59e0b'; ctx.lineWidth = 4;
+  // Яркая анимация мигания (пульсации) выбранного объекта на карте
+  if (networkView.selectedPts && networkView.selectedPts.length) {{
+    const pulse = (Math.sin(networkView.pulsePhase) + 1) / 2; // 0..1
+    ctx.save();
     if (networkView.selectedPts.length > 1) {{
+      ctx.strokeStyle = `rgba(239, 68, 68, ${{0.35 + 0.55 * pulse}})`;
+      ctx.lineWidth = 7 + 5 * pulse;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      networkView.selectedPts.forEach((p, i) => {{ const [x, y] = screenPoint(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }});
+      ctx.stroke();
+
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = 3.5;
       ctx.beginPath();
       networkView.selectedPts.forEach((p, i) => {{ const [x, y] = screenPoint(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }});
       ctx.stroke();
     }} else {{
       const [x, y] = screenPoint(networkView.selectedPts[0]);
-      ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fill();
+      const outerRadius = 12 + pulse * 14;
+      ctx.beginPath();
+      ctx.arc(x, y, outerRadius, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(239, 68, 68, ${{0.38 - pulse * 0.25}})`;
+      ctx.fill();
+      ctx.strokeStyle = `rgba(239, 68, 68, ${{0.9 - pulse * 0.4}})`;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(x, y, 7.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ef4444';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
     }}
+    ctx.restore();
   }}
 }}
 
 function mapFit() {{
-  const pts = Object.values(networkGeo.nodes || {{}}).filter(p => p && Number.isFinite(p[0]));
+  const pts = Object.values(networkGeo.nodes || {{}}).filter(p => p && Number.isFinite(p[0]) && Number.isFinite(p[1]));
   if (!pts.length) return;
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
   pts.forEach(([x, y]) => {{ if (x < xmin) xmin = x; if (x > xmax) xmax = x; if (y < ymin) ymin = y; if (y > ymax) ymax = y; }});
   const {{ w, h }} = mapSize();
-  const scale = Math.min((w - 40) / Math.max(xmax - xmin, 1), (h - 40) / Math.max(ymax - ymin, 1));
-  networkView.baseScale = scale; networkView.scale = scale;
-  networkView.tx = w / 2 - (xmin + xmax) * scale / 2;
-  networkView.ty = h / 2 + (ymin + ymax) * scale / 2;
-  document.getElementById('mapInfo').textContent = `Объектов с координатами: ${{pts.length}}`;
+  const scale = Math.min((w - 48) / Math.max(xmax - xmin, 1), (h - 48) / Math.max(ymax - ymin, 1));
+  networkView.baseScale = Math.max(scale, 1e-6);
+  networkView.scale = networkView.baseScale;
+  networkView.tx = w / 2 - ((xmin + xmax) / 2) * networkView.scale;
+  networkView.ty = h / 2 + ((ymin + ymax) / 2) * networkView.scale;
+  document.getElementById('mapInfo').textContent = `Объектов с координатами: ${{pts.length.toLocaleString('ru-RU')}}`;
   redrawMap();
 }}
 
+function initTimelineTicks() {{
+  const labels = DATA.hours_labels || [];
+  const rangeEl = document.getElementById('mapTimelineRange');
+  const ticksEl = document.getElementById('mapTimelineTicks');
+  if (!rangeEl || !ticksEl || !labels.length) return;
+  rangeEl.max = Math.max(0, labels.length - 1);
+  ticksEl.innerHTML = '';
+  const tickCount = Math.min(12, labels.length);
+  for (let i = 0; i < tickCount; i++) {{
+    const idx = Math.round((i / Math.max(tickCount - 1, 1)) * (labels.length - 1));
+    const span = document.createElement('span');
+    span.textContent = labels[idx];
+    span.onclick = () => {{
+      rangeEl.value = idx;
+      onMapTimelineChange(idx);
+    }};
+    ticksEl.appendChild(span);
+  }}
+}}
+
+function stepTimeline(delta) {{
+  const rangeEl = document.getElementById('mapTimelineRange');
+  if (!rangeEl) return;
+  const maxVal = Number(rangeEl.max) || 23;
+  const nextVal = Math.max(0, Math.min(maxVal, currentTimelineStep + delta));
+  rangeEl.value = nextVal;
+  onMapTimelineChange(nextVal);
+}}
+
 function onMapTimelineChange(val) {{
-  currentTimelineHour = Number(val);
-  document.getElementById('mapTimelineLabel').textContent = (DATA.hours_labels || [])[currentTimelineHour] || `${{currentTimelineHour}}:00`;
+  currentTimelineStep = Number(val);
+  const lbl = (DATA.hours_labels || [])[currentTimelineStep] || `${{String(currentTimelineStep).padStart(2, '0')}}:00`;
+  document.getElementById('mapTimelineLabel').textContent = lbl;
+  // Мгновенно обновляем карточку выбранного объекта на карте для нового времени!
+  if (selectedMapObjectId) {{
+    renderMapObjectCard(selectedMapObjectId);
+  }}
   redrawMap();
+}}
+
+function renderMapObjectCard(rawId) {{
+  if (!rawId) return;
+  const cid = clean_object_id(rawId);
+  const np = DATA.node_props[rawId] || DATA.node_props['c' + cid] || DATA.node_props['e' + cid] || DATA.node_props['k' + cid] || DATA.node_props[cid];
+  const pp = DATA.pipe_props[rawId] || DATA.pipe_props['e' + cid] || DATA.pipe_props[cid];
+  const pumpObj = (DATA.tables.pumps || []).find(p => String(p.clean_id) === cid);
+
+  const totalSteps = Math.max(1, (DATA.hours_labels || []).length);
+  function sampleSeriesAtStep(arr, stepIdx) {{
+    if (!arr || !arr.length) return null;
+    if (arr[stepIdx] !== undefined) return arr[stepIdx];
+    const pos = (stepIdx / Math.max(1, totalSteps - 1)) * (arr.length - 1);
+    const i0 = Math.floor(pos), i1 = Math.min(arr.length - 1, i0 + 1);
+    const frac = pos - i0;
+    return Number((arr[i0] * (1 - frac) + arr[i1] * frac).toFixed(2));
+  }}
+
+  const hrNodeArr = (DATA.node_hourly_pressures || {{}})[rawId] || (DATA.node_hourly_pressures || {{}})['c' + cid] || (DATA.node_hourly_pressures || {{}})[cid];
+  let pAtStep = sampleSeriesAtStep(hrNodeArr, currentTimelineStep);
+  if (pAtStep === null && np && typeof np.p_min === 'number' && typeof np.p_max === 'number') {{
+    const p50 = DATA.diurnal_free_pressure_percentiles_m?.p50 || [];
+    const p50Val = sampleSeriesAtStep(p50, currentTimelineStep);
+    if (p50Val !== null && p50.length) {{
+      const min50 = Math.min(...p50), max50 = Math.max(...p50);
+      const norm = max50 > min50 ? (p50Val - min50) / (max50 - min50) : 0.5;
+      pAtStep = Number((np.p_min + norm * (np.p_max - np.p_min)).toFixed(2));
+    }} else {{
+      pAtStep = np.p_mean ?? np.p_min;
+    }}
+  }}
+
+  const hrPipeArr = (DATA.pipe_hourly_flows || {{}})[rawId] || (DATA.pipe_hourly_flows || {{}})['e' + cid] || (DATA.pipe_hourly_flows || {{}})[cid];
+  let qPipeAtStep = sampleSeriesAtStep(hrPipeArr, currentTimelineStep);
+  if (qPipeAtStep === null && pp && typeof pp.q === 'number') {{
+    const dem = DATA.diurnal_demand_m3_h || [];
+    const demVal = sampleSeriesAtStep(dem, currentTimelineStep);
+    const maxDem = dem.length ? Math.max(...dem, 1) : 1;
+    qPipeAtStep = demVal !== null ? Number((pp.q * (demVal / maxDem)).toFixed(2)) : pp.q;
+  }}
+
+  const hrPumpArr = (DATA.pump_hourly_flows || {{}})[rawId] || (DATA.pump_hourly_flows || {{}})['p' + cid] || (DATA.pump_hourly_flows || {{}})[cid];
+  const qPumpAtStep = sampleSeriesAtStep(hrPumpArr, currentTimelineStep);
+
+  const stepLabel = (DATA.hours_labels || [])[currentTimelineStep] || `${{String(currentTimelineStep).padStart(2, '0')}}:00`;
+
+  const card = document.getElementById('mapObjectCard');
+  const title = document.getElementById('mapCardTitle');
+  const body = document.getElementById('mapCardBody');
+  title.innerHTML = `Объект #${{cid}} <span style="font-size:11.5px;color:var(--brand);font-weight:700">• Время ${{stepLabel}}</span>`;
+  body.innerHTML = '';
+  const addProp = (k, v, highlight = false) => {{
+    body.innerHTML += `<div style="${{highlight ? 'background:#f0f9ff;padding:4px 6px;border-radius:6px;border:1px solid #bae6fd;' : ''}}"><div class="map-prop-label">${{k}}</div><div class="map-prop-val" style="${{highlight ? 'color:#0284c7;font-size:13.5px;' : ''}}">${{v ?? '—'}}</div></div>`;
+  }};
+
+  if (np) {{
+    addProp('Роль в схеме', np.role);
+    addProp('Отметка земли Z', `${{np.z ?? '—'}} м`);
+    addProp(`Напор в ${{stepLabel}}`, `${{pAtStep ?? np.p_min ?? '—'}} м`, true);
+    addProp('Мин / Макс Pсвоб', `${{np.p_min ?? '—'}} / ${{np.p_max ?? '—'}} м`);
+    addProp('Требуемый напор', `${{np.req}}`);
+    addProp('Отбор абонента', `${{np.demand ?? 0}} м³/ч`);
+    if (np.advice || np.diagnostic_advice) {{
+      body.innerHTML += `<div style="grid-column:1/-1;margin-top:4px;padding-top:6px;border-top:1px dashed #cbd5e1;font-size:11.5px;color:#334155;">${{formatTextWithObjectButtons(np.advice || np.diagnostic_advice)}}</div>`;
+    }}
+  }} else if (pp) {{
+    addProp('Тип элемента', pp.closed ? 'Труба (Перекрыта, Q=0)' : 'Трубопровод');
+    addProp('Диаметр / Длина', `${{pp.d}} мм / ${{pp.l}} м`);
+    addProp(`Поток в ${{stepLabel}}`, `${{qPipeAtStep ?? pp.q ?? 0}} м³/ч`, true);
+    addProp('Макс. скорость / Потери', `${{pp.v ?? 0}} м/с / ${{pp.i ?? 0}} м/км`);
+    addProp('Узлы (Нач → Кон)', `#${{pp.sn || '—'}} → #${{pp.en || '—'}}`);
+    addProp('Шероховатость C', `${{pp.c ?? '—'}}`);
+  }} else if (pumpObj) {{
+    addProp('Тип насоса', pumpObj.pump_type);
+    addProp(`Подача в ${{stepLabel}}`, `${{qPumpAtStep ?? pumpObj.q_work ?? 0}} м³/ч`, true);
+    addProp('Номинал Qном / Hраб', `${{pumpObj.q_nom ?? '—'}} м³/ч / ${{pumpObj.h_work ?? '—'}} м`);
+    addProp('Узлы (Вход → Коллектор)', `#${{pumpObj.start_node}} → #${{pumpObj.end_node}}`);
+    body.innerHTML += `<div style="grid-column:1/-1;margin-top:4px;padding-top:6px;border-top:1px dashed #cbd5e1;font-size:11.5px;color:#334155;">${{formatTextWithObjectButtons(pumpObj.advice)}}</div>`;
+  }} else {{
+    addProp('Статус', 'Координатный узел модели');
+    addProp(`Значение в ${{stepLabel}}`, `${{pAtStep ?? '—'}}`, true);
+  }}
+  card.style.display = 'block';
 }}
 
 function focusMapObject(rawId) {{
   if (!rawId) return;
   const cid = clean_object_id(rawId);
+  selectedMapObjectId = rawId;
   const nodes = networkGeo.nodes || {{}};
-  const pt = nodes[rawId] || nodes['c' + cid] || nodes['e' + cid] || nodes['k' + cid] || nodes[cid];
+  let pt = nodes[rawId] || nodes['c' + cid] || nodes['e' + cid] || nodes['k' + cid] || nodes[cid];
   const link = (networkGeo.links || []).find(([lid]) => clean_object_id(lid) === cid);
-  const pts = pt ? [pt] : (link ? link[1] : null);
 
+  // Если ищем насос или трубу, которой нет в links, найдем координаты её начального/конечного узла
+  if (!pt && !link) {{
+    const pumpRow = (DATA.tables.pumps || []).find(p => String(p.clean_id) === cid);
+    const pipeRow = (DATA.tables.pipes || []).find(p => String(p.clean_id) === cid);
+    const sn = pumpRow?.start_node || pipeRow?.start_node;
+    const en = pumpRow?.end_node || pipeRow?.end_node;
+    const p1 = sn ? (nodes[sn] || nodes['c' + sn] || nodes['e' + sn]) : null;
+    const p2 = en ? (nodes[en] || nodes['c' + en] || nodes['e' + en]) : null;
+    if (p1 && p2) pt = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
+    else if (p1 || p2) pt = p1 || p2;
+  }}
+
+  const pts = pt ? [pt] : (link ? link[1] : null);
   if (pts && pts.length) {{
     const {{ w, h }} = mapSize();
-    networkView.scale = networkView.baseScale * 10;
-    networkView.tx = w / 2 - pts[0][0] * networkView.scale;
-    networkView.ty = h / 2 + pts[0][1] * networkView.scale;
+    const targetScale = Math.max(networkView.baseScale * 8, networkView.scale);
+    networkView.scale = Math.min(networkView.baseScale * 80, targetScale);
+    const centerPt = pts[Math.floor(pts.length / 2)];
+    networkView.tx = w / 2 - centerPt[0] * networkView.scale;
+    networkView.ty = h / 2 + centerPt[1] * networkView.scale;
     networkView.selectedPts = pts;
+    ensurePulseAnimation();
     redrawMap();
   }}
 
-  const np = DATA.node_props[rawId] || DATA.node_props['c' + cid] || DATA.node_props['e' + cid] || DATA.node_props['k' + cid] || DATA.node_props[cid];
-  const pp = DATA.pipe_props[rawId] || DATA.pipe_props['e' + cid] || DATA.pipe_props[cid];
-  const hrArr = (DATA.node_hourly_pressures || {{}})['c' + cid] || (DATA.node_hourly_pressures || {{}})[rawId];
-  const pAtStep = hrArr ? hrArr[currentTimelineHour] : null;
-
-  const card = document.getElementById('mapObjectCard');
-  const title = document.getElementById('mapCardTitle');
-  const body = document.getElementById('mapCardBody');
-  title.textContent = `Объект #${{cid}}`;
-  body.innerHTML = '';
-  const addProp = (k, v) => {{ body.innerHTML += `<div><div class="map-prop-label">${{k}}</div><div class="map-prop-val">${{v ?? '—'}}</div></div>`; }};
-
-  if (np) {{
-    addProp('Роль в схеме', np.role);
-    addProp('Отметка земли Z', `${{np.z ?? '—'}} м`);
-    addProp(`Напор на шаге (${{currentTimelineHour}}:00)`, `${{pAtStep ?? np.p_min ?? '—'}} м`);
-    addProp('Мин / Макс Pсвоб', `${{np.p_min ?? '—'}} / ${{np.p_max ?? '—'}} м`);
-    addProp('Требуемый напор', `${{np.req}}`);
-    addProp('Отбор абонента', `${{np.demand ?? 0}} м³/ч`);
-    addProp('Транзитный поток', `${{np.transit_q ?? 0}} м³/ч`);
-    addProp('Подключено труб', `${{np.connected_pipes ?? 1}} шт.`);
-  }} else if (pp) {{
-    addProp('Тип элемента', pp.closed ? 'Труба (Перекрыта задвижкой, Q=0)' : 'Трубопровод');
-    addProp('Диаметр / Длина', `${{pp.d}} мм / ${{pp.l}} м`);
-    addProp('Скорость / Потери', `${{pp.v ?? 0}} м/с / ${{pp.i ?? 0}} м/км`);
-    addProp('Шероховатость C', `${{pp.c ?? '—'}}`);
-  }} else {{
-    addProp('Статус', 'Координатный узел модели');
-  }}
-  card.style.display = 'block';
+  renderMapObjectCard(rawId);
 }}
 
-function closeMapCard() {{ document.getElementById('mapObjectCard').style.display = 'none'; }}
+function closeMapCard() {{
+  document.getElementById('mapObjectCard').style.display = 'none';
+  selectedMapObjectId = null;
+  networkView.selectedPts = null;
+  redrawMap();
+}}
+
+// Перетаскивание карты (Pan) и клик по объекту
+networkCanvas.addEventListener('mousedown', ev => {{
+  networkView.dragging = true;
+  networkView.moved = false;
+  networkView.dragStartX = ev.clientX - networkView.tx;
+  networkView.dragStartY = ev.clientY - networkView.ty;
+}});
+window.addEventListener('mousemove', ev => {{
+  if (!networkView.dragging) return;
+  networkView.moved = true;
+  networkView.tx = ev.clientX - networkView.dragStartX;
+  networkView.ty = ev.clientY - networkView.dragStartY;
+  redrawMap();
+}});
+window.addEventListener('mouseup', () => {{ networkView.dragging = false; }});
 
 networkCanvas.addEventListener('click', ev => {{
+  if (networkView.moved) return;
   const rect = networkCanvas.getBoundingClientRect();
   const wx = (ev.clientX - rect.left - networkView.tx) / networkView.scale;
   const wy = (networkView.ty - (ev.clientY - rect.top)) / networkView.scale;
-  let bestId = null, bestD = 16 / networkView.scale;
+  let bestId = null, bestD = 18 / networkView.scale;
   for (const [nid, p] of Object.entries(networkGeo.nodes || {{}})) {{
+    if (!p) continue;
     const d = Math.hypot(p[0] - wx, p[1] - wy);
     if (d < bestD) {{ bestD = d; bestId = nid; }}
   }}
@@ -1436,61 +2194,124 @@ networkCanvas.addEventListener('click', ev => {{
 
 networkCanvas.addEventListener('wheel', ev => {{
   ev.preventDefault();
-  const f = ev.deltaY < 0 ? 1.25 : 0.8;
-  networkView.scale = Math.max(networkView.baseScale * 0.4, Math.min(networkView.baseScale * 80, networkView.scale * f));
-  redrawMap();
+  const rect = networkCanvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  const my = ev.clientY - rect.top;
+  const factor = ev.deltaY < 0 ? 1.25 : 0.8;
+  zoomMapAtPoint(factor, mx, my);
 }}, {{ passive: false }});
 
-document.getElementById('mapPlus').onclick = () => {{ networkView.scale *= 1.3; redrawMap(); }};
-document.getElementById('mapMinus').onclick = () => {{ networkView.scale /= 1.3; redrawMap(); }};
-document.getElementById('mapReset').onclick = () => {{ networkView.selectedPts = null; closeMapCard(); mapFit(); }};
+document.getElementById('mapPlus').onclick = () => {{
+  const {{ w, h }} = mapSize();
+  zoomMapAtPoint(1.35, w / 2, h / 2);
+}};
+document.getElementById('mapMinus').onclick = () => {{
+  const {{ w, h }} = mapSize();
+  zoomMapAtPoint(1 / 1.35, w / 2, h / 2);
+}};
+document.getElementById('mapReset').onclick = () => {{
+  networkView.selectedPts = null;
+  selectedMapObjectId = null;
+  closeMapCard();
+  mapFit();
+}};
 document.getElementById('mapFind').onclick = () => focusMapObject(document.getElementById('mapSearch').value);
 
 document.addEventListener('click', ev => {{
   const btn = ev.target.closest('[data-map-id]');
   if (btn) {{
     ev.preventDefault();
-    document.getElementById('mapSection').scrollIntoView({{ behavior: 'smooth' }});
-    focusMapObject(btn.dataset.mapId);
+    const rawId = btn.dataset.mapId;
+    document.getElementById('mapSection').scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+    focusMapObject(rawId);
   }}
 }});
 
-let currentTable = 'nodes', currentSearch = '', highlightRowId = null;
+// =================== ТАБЛИЦЫ: СОРТИРОВКА, БЫСТРЫЕ ФИЛЬТРЫ И ПОДСВЕТКА ===================
+let currentTable = 'nodes';
+let currentSearch = '';
+let currentFilterPreset = 'all';
+let currentSortKey = null;
+let currentSortDir = 'asc';
+let highlightRowId = null;
+
+const TABLE_FILTER_PRESETS = {{
+  nodes: [
+    {{ id: 'all', label: 'Все узлы', fn: () => true }},
+    {{ id: 'data_error', label: 'Критический вакуум (< -3.0 м)', fn: r => Number(r.free_pressure_min_m) < -3.0 }},
+    {{ id: 'deficit', label: 'Дефицит напора (ΔP < 0)', fn: r => Number(r.margin_m) < 0 && Number(r.free_pressure_min_m) >= -3.0 }},
+    {{ id: 'excess', label: 'Избыток (> 60 м)', fn: r => Number(r.free_pressure_max_m) > 60.0 }},
+    {{ id: 'negative', label: 'Любое P < 0 м', fn: r => Number(r.free_pressure_min_m) < 0.0 }}
+  ],
+  pipes: [
+    {{ id: 'all', label: 'Все участки', fn: () => true }},
+    {{ id: 'bottlenecks', label: 'Узкие места (i ≥ 15 м/км или V ≥ 5 м/с)', fn: r => Number(r.headloss_m_km) >= 15.0 || Number(r.velocity_max_m_s) >= 5.0 }},
+    {{ id: 'low_c', label: 'Деградация C (< 80)', fn: r => r.hazen_williams_c !== '—' && Number(r.hazen_williams_c) < 80 }},
+    {{ id: 'closed', label: 'Перекрыты (Q = 0)', fn: r => Boolean(r.is_closed) || r.velocity_bin === 'Перекрыты / Поток = 0 (задвижка)' || Number(r.velocity_max_m_s) <= 0.001 }},
+    {{ id: 'stagnant', label: 'Низкие скорости (< 0.10 м/с)', fn: r => r.velocity_bin === 'Низкие скорости (< 0.10 м/с)' || (Number(r.velocity_max_m_s) > 0.001 && Number(r.velocity_max_m_s) < 0.10) }},
+    {{ id: 'vel_moderate', label: 'Умеренные (0.10–0.50 м/с)', fn: r => r.velocity_bin === 'Умеренные (0.10–0.50 м/с)' || (Number(r.velocity_max_m_s) >= 0.10 && Number(r.velocity_max_m_s) < 0.50) }},
+    {{ id: 'vel_optimum', label: 'Оптимум (0.50–1.50 м/с)', fn: r => r.velocity_bin === 'Оптимум (0.50–1.50 м/с)' || (Number(r.velocity_max_m_s) >= 0.50 && Number(r.velocity_max_m_s) <= 1.50) }},
+    {{ id: 'vel_elevated', label: 'Повышенные (1.50–5.00 м/с)', fn: r => r.velocity_bin === 'Повышенные (1.50–5.00 м/с)' || (Number(r.velocity_max_m_s) > 1.50 && Number(r.velocity_max_m_s) < 5.00) }},
+    {{ id: 'vel_extreme', label: 'Большая скорость (≥ 5.00 м/с)', fn: r => r.velocity_bin === 'Большая скорость (>= 5.00 м/с)' || Number(r.velocity_max_m_s) >= 5.00 }}
+  ],
+  pumps: [
+    {{ id: 'all', label: 'Все насосы', fn: () => true }},
+    {{ id: 'borehole', label: 'Скважинные (1-й подъем)', fn: r => Boolean(r.is_borehole) }},
+    {{ id: 'booster', label: 'Сетевые (НС)', fn: r => !r.is_borehole }},
+    {{ id: 'underload', label: 'Недогрузка (< 75% Qном)', fn: r => String(r.regime).includes('Недогрузка') }},
+    {{ id: 'overload', label: 'Перегрузка (> 115% Qном)', fn: r => String(r.regime).includes('Перегрузка') }},
+    {{ id: 'imbalance', label: 'Все отклонения (Недогрузка + Перегрузка)', fn: r => String(r.regime).includes('Недогрузка') || String(r.regime).includes('Перегрузка') }},
+    {{ id: 'bep', label: 'Оптимум BEP', fn: r => String(r.regime).includes('Оптимум') }},
+    {{ id: 'off', label: 'Выключены / Резерв (Q = 0)', fn: r => !r.active || Number(r.q_work) <= 0.001 }}
+  ],
+  valves: [
+    {{ id: 'all', label: 'Все клапаны', fn: () => true }},
+    {{ id: 'active_reg', label: 'Активное регулирование', fn: r => String(r.status).includes('Активное') }},
+    {{ id: 'closed_v', label: 'Закрыты (Q = 0)', fn: r => String(r.status).includes('Закрыт') }}
+  ]
+}};
+
 const tableSchemas = {{
   nodes: [
-    {{ key: 'clean_id', label: 'ID узла', isId: true }},
+    {{ key: 'clean_id', label: 'ID узла (на карту)', isId: true }},
     {{ key: 'elevation_m', label: 'Отметка Z, м' }},
     {{ key: 'floors', label: 'Этажность' }},
     {{ key: 'required_pressure_m', label: 'P_треб, м' }},
     {{ key: 'free_pressure_min_m', label: 'P_своб мин, м', isCrit: r => Number(r.free_pressure_min_m) < 0 }},
     {{ key: 'free_pressure_max_m', label: 'P_своб макс, м', isCrit: r => Number(r.free_pressure_max_m) > 60 }},
     {{ key: 'margin_m', label: 'Дефицит ΔP, м', isCrit: r => Number(r.margin_m) < 0 }},
-    {{ key: 'demand_m3_h', label: 'Отбор, м³/ч' }}
+    {{ key: 'demand_m3_h', label: 'Отбор, м³/ч' }},
+    {{ key: 'advice', label: 'Инженерный вывод ИИ (причина и мероприятие)', isRichAdvice: true }}
   ],
   pipes: [
-    {{ key: 'clean_id', label: 'ID участка', isId: true }},
+    {{ key: 'clean_id', label: 'ID участка (на карту)', isId: true }},
+    {{ key: 'start_node', label: 'Нач. узел', isNodeRef: true }},
+    {{ key: 'end_node', label: 'Кон. узел', isNodeRef: true }},
     {{ key: 'diameter_mm', label: 'Диаметр, мм' }},
     {{ key: 'length_m', label: 'Длина, м' }},
     {{ key: 'velocity_max_m_s', label: 'Скорость V, м/с' }},
-    {{ key: 'headloss_m_km', label: 'Потери i, м/км', isCrit: r => Number(r.headloss_m_km) >= 20 }},
+    {{ key: 'headloss_m_km', label: 'Потери i, м/км', isCrit: r => Number(r.headloss_m_km) >= 15 }},
     {{ key: 'hazen_williams_c', label: 'Коэфф. C' }},
-    {{ key: 'flow_m3_h', label: 'Поток Q, м³/ч' }}
+    {{ key: 'flow_m3_h', label: 'Поток Q, м³/ч' }},
+    {{ key: 'advice', label: 'Инженерный вывод ИИ', isRichAdvice: true }}
   ],
   pumps: [
-    {{ key: 'clean_id', label: 'ID насоса', isId: true }},
-    {{ key: 'pump_type', label: 'Тип (Скважинный / Сетевой)', isBadge: true }},
-    {{ key: 'start_node', label: 'Нач. узел (Источник)' }},
+    {{ key: 'clean_id', label: 'ID насоса (на карту)', isId: true }},
+    {{ key: 'pump_type', label: 'Тип агрегата', isBadge: true }},
+    {{ key: 'start_node', label: 'Вход / Источник', isNodeRef: true }},
+    {{ key: 'end_node', label: 'Коллектор (Выход)', isNodeRef: true }},
     {{ key: 'q_work', label: 'Q_раб, м³/ч' }},
     {{ key: 'q_nom', label: 'Q_ном, м³/ч' }},
     {{ key: 'h_work', label: 'H_раб, м' }},
-    {{ key: 'regime', label: 'Режим' }},
-    {{ key: 'advice', label: 'Диагностика по правилам' }}
+    {{ key: 'regime', label: 'Режим работы' }},
+    {{ key: 'advice', label: 'Инженерный вывод ИИ (по узлам и коллектору)', isRichAdvice: true }}
   ],
   valves: [
-    {{ key: 'clean_id', label: 'ID клапана', isId: true }},
+    {{ key: 'clean_id', label: 'ID клапана (на карту)', isId: true }},
     {{ key: 'type_code', label: 'Тип клапана' }},
-    {{ key: 'type_desc', label: 'Назначение' }},
-    {{ key: 'setting', label: 'Настройка' }},
+    {{ key: 'start_node', label: 'Нач. узел', isNodeRef: true }},
+    {{ key: 'end_node', label: 'Кон. узел', isNodeRef: true }},
+    {{ key: 'setting', label: 'Уставка' }},
     {{ key: 'flow_min', label: 'Q_мин, м³/ч' }},
     {{ key: 'flow_max', label: 'Q_макс, м³/ч' }},
     {{ key: 'flow_swing', label: 'Перепад ΔQ, м³/ч' }},
@@ -1498,35 +2319,169 @@ const tableSchemas = {{
   ]
 }};
 
-function switchTableTab(tab, btn, focusId = null) {{
-  currentTable = tab; highlightRowId = focusId;
-  document.querySelectorAll('.table-tab-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
+function renderTableFilters() {{
+  const container = document.getElementById('tableFilters');
+  if (!container) return;
+  const presets = TABLE_FILTER_PRESETS[currentTable] || [];
+  const allRows = DATA.tables[currentTable] || [];
+  container.innerHTML = presets.map(p => {{
+    const cnt = allRows.filter(p.fn).length;
+    const activeCls = currentFilterPreset === p.id ? 'active' : '';
+    return `<button type="button" class="filter-chip ${{activeCls}}" onclick="setTableFilterPreset('${{p.id}}')">${{p.label}} (${{cnt}})</button>`;
+  }}).join('');
+}}
+
+function setTableFilterPreset(presetId) {{
+  currentFilterPreset = presetId;
+  highlightIdsSet.clear();
+  clearAnalysisBox('tableAIAnalysisBox');
+  renderTableFilters();
   renderTable();
 }}
 
-function onTableSearch(val) {{ currentSearch = (val || '').toLowerCase(); renderTable(); }}
+function resetTableFilters() {{
+  currentFilterPreset = 'all';
+  currentSearch = '';
+  currentSortKey = null;
+  highlightIdsSet.clear();
+  highlightRowId = null;
+  const sInp = document.getElementById('tableSearchInput');
+  if (sInp) sInp.value = '';
+  const banner = document.getElementById('tableStatusBanner');
+  if (banner) banner.style.display = 'none';
+  clearAnalysisBox('tableAIAnalysisBox');
+  renderTableFilters();
+  renderTable();
+}}
 
-function renderTable() {{
-  const schema = tableSchemas[currentTable] || [];
-  let rows = DATA.tables[currentTable] || [];
+function applyTablePresetAndHighlight(tab, preset, sortKey, sortDir, highlightIds, focusId, bannerTitle) {{
+  currentTable = tab;
+  currentFilterPreset = preset || 'all';
+  currentSortKey = sortKey || null;
+  currentSortDir = sortDir || 'asc';
+  highlightIdsSet = new Set((highlightIds || []).map(String));
+  highlightRowId = focusId ? String(focusId) : null;
+
+  document.querySelectorAll('.table-tab-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById('tabBtn_' + tab);
+  if (btn) btn.classList.add('active');
+
+  renderTableFilters();
+  renderTable();
+
+  const banner = document.getElementById('tableStatusBanner');
+  const bannerTxt = document.getElementById('tableStatusText');
+  if (banner && bannerTxt) {{
+    banner.style.display = 'flex';
+    bannerTxt.innerHTML = `Активна выборка: <b>${{bannerTitle || preset}}</b> (подсвечено объектов: <b>${{highlightIdsSet.size || (focusId ? 1 : 'все в фильтре')}}</b>, сортировка по <code>${{sortKey || 'ID'}}</code>)`;
+  }}
+}}
+
+function switchTableTab(tab, btn, focusId = null) {{
+  currentTable = tab;
+  currentFilterPreset = 'all';
+  currentSortKey = null;
+  highlightRowId = focusId ? String(focusId) : null;
+  highlightIdsSet.clear();
+  if (focusId) highlightIdsSet.add(String(focusId));
+  document.querySelectorAll('.table-tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  const banner = document.getElementById('tableStatusBanner');
+  if (banner) banner.style.display = 'none';
+  clearAnalysisBox('tableAIAnalysisBox');
+  renderTableFilters();
+  renderTable();
+}}
+
+function onTableSearch(val) {{
+  currentSearch = (val || '').toLowerCase();
+  renderTable();
+}}
+
+function onTableColumnSort(colKey) {{
+  if (currentSortKey === colKey) {{
+    currentSortDir = currentSortDir === 'asc' ? 'desc' : 'asc';
+  }} else {{
+    currentSortKey = colKey;
+    currentSortDir = 'asc';
+  }}
+  renderTable();
+}}
+
+function getFilteredAndSortedRows() {{
+  let rows = [...(DATA.tables[currentTable] || [])];
+  const presets = TABLE_FILTER_PRESETS[currentTable] || [];
+  const activePreset = presets.find(p => p.id === currentFilterPreset);
+  if (activePreset && activePreset.id !== 'all') {{
+    const filtered = rows.filter(activePreset.fn);
+    if (filtered.length > 0 || highlightIdsSet.size === 0) {{
+      rows = filtered;
+    }}
+  }}
+  if (highlightIdsSet.size > 0 && currentFilterPreset === 'all') {{
+    // Если передан список ID для подсветки без пресета, поднимаем их наверх
+    rows.sort((a, b) => (highlightIdsSet.has(String(b.clean_id)) ? 1 : 0) - (highlightIdsSet.has(String(a.clean_id)) ? 1 : 0));
+  }}
   if (currentSearch) {{
     rows = rows.filter(r => Object.values(r).some(v => String(v ?? '').toLowerCase().includes(currentSearch)));
   }}
+  if (currentSortKey) {{
+    const dir = currentSortDir === 'asc' ? 1 : -1;
+    rows.sort((a, b) => {{
+      const va = a[currentSortKey], vb = b[currentSortKey];
+      const na = Number(va), nb = Number(vb);
+      if (Number.isFinite(na) && Number.isFinite(nb) && va !== '—' && vb !== '—') {{
+        return (na - nb) * dir;
+      }}
+      return String(va ?? '').localeCompare(String(vb ?? ''), 'ru') * dir;
+    }});
+  }}
+  return rows;
+}}
+
+function renderTable() {{
+  const schema = tableSchemas[currentTable] || [];
+  const rows = getFilteredAndSortedRows();
+
   const thead = document.getElementById('mainTableHead');
-  thead.innerHTML = '<tr>' + schema.map(c => `<th>${{c.label}}</th>`).join('') + '</tr>';
+  thead.innerHTML = '<tr>' + schema.map(c => {{
+    const isSorted = currentSortKey === c.key;
+    const arrow = isSorted ? (currentSortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
+    return `<th onclick="onTableColumnSort('${{c.key}}')" title="Нажмите для сортировки по столбцу «${{c.label}}»">${{c.label}}<span style="color:${{isSorted ? '#0284c7' : '#94a3b8'}};font-size:11px">${{arrow}}</span></th>`;
+  }}).join('') + '</tr>';
+
   const tbody = document.getElementById('mainTableBody');
   tbody.innerHTML = '';
-  rows.slice(0, 120).forEach(r => {{
+
+  if (rows.length === 0) {{
     const tr = tbody.insertRow();
-    if (highlightRowId && String(r.clean_id) === String(highlightRowId)) tr.className = 'row-highlighted';
+    const td = tr.insertCell();
+    td.colSpan = schema.length;
+    td.style.cssText = 'text-align:center;padding:24px;color:#64748b;';
+    td.innerHTML = `По выбранному фильтру записей не найдено. <button type="button" class="btn-subtle" onclick="resetTableFilters()">Показать все строки</button>`;
+    return;
+  }}
+
+  rows.slice(0, 200).forEach(r => {{
+    const tr = tbody.insertRow();
+    const cidStr = String(r.clean_id);
+    if (highlightRowId && cidStr === String(highlightRowId)) {{
+      tr.className = 'row-focused';
+    }} else if (highlightIdsSet.has(cidStr)) {{
+      tr.className = 'row-highlighted';
+    }}
+
     schema.forEach(col => {{
       const td = tr.insertCell();
       const v = r[col.key] ?? '—';
       if (col.isId) {{
-        td.innerHTML = `<button type="button" class="object-link" data-map-id="${{v}}">${{v}}</button>`;
+        td.innerHTML = `<button type="button" class="object-link" data-map-id="${{v}}" title="Центрировать и подсветить #${{v}} на карте">${{v}}</button><button type="button" class="map-jump-btn" data-map-id="${{v}}">На карту ↗</button>`;
+      }} else if (col.isNodeRef && v !== '—') {{
+        td.innerHTML = `<button type="button" class="object-link" data-map-id="${{v}}" title="Показать узел #${{v}} на карте">#${{v}}</button>`;
       }} else if (col.isBadge) {{
         td.innerHTML = `<span class="${{r.is_borehole ? 'badge-bh' : 'badge-net'}}">${{v}}</span>`;
+      }} else if (col.isRichAdvice) {{
+        td.innerHTML = formatTextWithObjectButtons(v);
       }} else {{
         td.textContent = String(v);
       }}
@@ -1535,23 +2490,72 @@ function renderTable() {{
   }});
 }}
 
-function onQHSelectChange(v) {{ currentQHIndex = Number(v); qhShowAllMode = false; drawQHCurve(currentQHIndex); }}
-function toggleQHShowAll() {{ qhShowAllMode = !qhShowAllMode; drawQHCurve(currentQHIndex); }}
+async function generateTableAIAnalysis() {{
+  const box = document.getElementById('tableAIAnalysisBox');
+  if (!box) return;
+  const rows = getFilteredAndSortedRows();
+  const sample = rows.slice(0, 5);
+  const tabNames = {{ nodes: 'Узлы абонентов', pipes: 'Трубопроводы', pumps: 'Насосные агрегаты', valves: 'Клапаны' }};
+  const topSummary = sample.map(r => `#${{r.clean_id}}: ${{r.advice || r.status || ''}}`).join('<br>• ');
+  const htmlStr = `<strong>ИИ-разбор текущей выборки таблицы «${{tabNames[currentTable]}}» (найдено строк: ${{rows.length}}):</strong><br>
+  • <b>Приоритетные объекты выборки:</b><br>• ${{formatTextWithObjectButtons(topSummary || 'Нет данных')}}<br>
+  • <b>Рекомендация:</b> Нажмите «На карту ↗» напротив любого ID в таблице, чтобы визуально локализовать проблемный узел/участок и проверить его динамику по временной шкале.`;
+  streamHTMLIntoBox(box, htmlStr, 'table');
+}}
+
+function onQHSelectChange(v) {{
+  currentQHIndex = Number(v);
+  qhShowAllMode = false;
+  clearAnalysisBox('qhAnalysis');
+  drawQHCurve(currentQHIndex);
+}}
+
+function toggleQHShowAll() {{
+  qhShowAllMode = !qhShowAllMode;
+  clearAnalysisBox('qhAnalysis');
+  drawQHCurve(currentQHIndex);
+}}
 
 function attachInteractiveCrosshairs() {{
+  // 1. Кривая Q-H: наведение и клик по точке -> переход к насосу в таблице
   const qhC = document.getElementById('qhCanvas');
   qhC.addEventListener('mousemove', ev => {{
     const m = qhC._meta; if (!m) return;
     const rect = qhC.getBoundingClientRect();
     const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
     if (px < m.pad.l || px > m.pad.l + m.pw || py < m.pad.t || py > m.pad.t + m.ph) {{ hideChartTooltip(); drawQHCurve(currentQHIndex); return; }}
+    let hitOp = null;
+    for (const op of (m.opPoints || [])) {{
+      if (Math.hypot(op.px - px, op.py - py) < 14) {{ hitOp = op; break; }}
+    }}
     const q = ((px - m.pad.l) / m.pw) * m.maxQ;
     const h = ((m.pad.t + m.ph - py) / m.ph) * m.maxH;
-    drawQHCurve(currentQHIndex, {{ px, py, q, h }});
-    showChartTooltip(ev, `Подача Q: <b>${{q.toFixed(1)}} м³/ч</b><br>Напор H: <b>${{h.toFixed(1)}} м</b>`);
+    drawQHCurve(currentQHIndex, {{ px: hitOp ? hitOp.px : px, py: hitOp ? hitOp.py : py, q: hitOp ? hitOp.item.operating_q_mean : q, h: hitOp ? hitOp.item.operating_h_est : h }});
+    if (hitOp) {{
+      qhC.style.cursor = 'pointer';
+      showChartTooltip(ev, `<b>Насос #${{hitOp.item.clean_id}}</b> (${{hitOp.item.is_borehole ? 'Скважинный' : 'Сетевой'}})<br>Подача Q: <b>${{hitOp.item.operating_q_mean}} м³/ч</b> • Напор H: <b>${{hitOp.item.operating_h_est}} м</b><br><span style="color:#38bdf8">Кликните для перехода к строке в таблице ↓</span>`);
+    }} else {{
+      qhC.style.cursor = 'crosshair';
+      showChartTooltip(ev, `Подача Q: <b>${{q.toFixed(1)}} м³/ч</b><br>Напор H: <b>${{h.toFixed(1)}} м</b>`);
+    }}
+  }});
+  qhC.addEventListener('click', ev => {{
+    const m = qhC._meta; if (!m) return;
+    const rect = qhC.getBoundingClientRect();
+    const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+    for (const op of (m.opPoints || [])) {{
+      if (Math.hypot(op.px - px, op.py - py) < 16) {{
+        jumpToTableRowFromChart('pumps', op.item.clean_id);
+        return;
+      }}
+    }}
+    if (!qhShowAllMode && m.curvesToPlot?.[0]?.clean_id) {{
+      jumpToTableRowFromChart('pumps', m.curvesToPlot[0].clean_id);
+    }}
   }});
   qhC.addEventListener('mouseleave', () => {{ hideChartTooltip(); drawQHCurve(currentQHIndex); }});
 
+  // 2. График дефицитов напора: наведение и клик по точке -> переход к узлу в таблице
   const pbC = document.getElementById('pressureBandCanvas');
   pbC.addEventListener('mousemove', ev => {{
     const m = pbC._meta; if (!m) return;
@@ -1564,12 +2568,15 @@ function attachInteractiveCrosshairs() {{
         const d = Math.hypot(m.xOf(p.z || 0) - mx, m.yOf(p.dp || 0) - my);
         if (d < bestD) {{ bestD = d; best = p; }}
       }});
+      pbC._hoveredPoint = best;
       if (best) {{
+        pbC.style.cursor = 'pointer';
         const px = m.xOf(best.z || 0), py = m.yOf(best.dp || 0);
         drawPressureBand({{ px, py, xVal: best.z || 0, yVal: best.dp || 0 }});
-        showChartTooltip(ev, `<b>Узел #${{best.clean_id}}</b> (${{best.floors}} эт.)<br>Отметка Z: <b>${{best.z}} м</b><br>Pсвоб: <b>${{best.p_free}} м</b> (треб. ${{best.p_req}} м)<br>Дефицит ΔP: <b>${{best.dp}} м</b>`);
+        showChartTooltip(ev, `<b>Узел #${{best.clean_id}}</b> (${{best.floors}} эт.)<br>Отметка Z: <b>${{best.z}} м</b> • Pсвоб: <b>${{best.p_free}} м</b><br>Дефицит ΔP: <b>${{best.dp}} м</b><br><span style="color:#38bdf8">Кликните для подсветки в таблице узлов ↓</span>`);
         return;
       }}
+      pbC.style.cursor = 'crosshair';
       const xVal = m.minX + ((mx - m.pad.l) / m.pw) * (m.maxX - m.minX);
       const yVal = m.minY + ((m.pad.t + m.ph - my) / m.ph) * (m.maxY - m.minY);
       drawPressureBand({{ px: mx, py: my, xVal, yVal }});
@@ -1577,12 +2584,18 @@ function attachInteractiveCrosshairs() {{
     }} else {{
       const idx = Math.max(0, Math.min(m.n - 1, Math.round(((mx - m.pad.l) / m.pw) * (m.n - 1))));
       const yVal = m.pb.p50[idx] ?? 0;
-      drawPressureBand({{ px: m.xOf(idx), py: m.yOf(yVal), xLabel: `${{idx}}:00`, yVal }});
-      showChartTooltip(ev, `<b>Час ${{idx}}:00</b><br>Медиана P50: <b>${{yVal}} м</b><br>Коридор P10..P90: ${{m.pb.p10[idx]}} .. ${{m.pb.p90[idx]}} м`);
+      drawPressureBand({{ px: m.xOf(idx), py: m.yOf(yVal), xLabel: `${{String(idx).padStart(2, '0')}}:00`, yVal }});
+      showChartTooltip(ev, `<b>Час ${{String(idx).padStart(2, '0')}}:00</b><br>Медиана P50: <b>${{yVal}} м</b><br>Коридор P10..P90: ${{m.pb.p10[idx]}} .. ${{m.pb.p90[idx]}} м`);
+    }}
+  }});
+  pbC.addEventListener('click', () => {{
+    if (pbC._hoveredPoint && pbC._hoveredPoint.clean_id) {{
+      jumpToTableRowFromChart('nodes', pbC._hoveredPoint.clean_id);
     }}
   }});
   pbC.addEventListener('mouseleave', () => {{ hideChartTooltip(); drawPressureBand(); }});
 
+  // 3. График узких мест: наведение и клик по точке -> переход к трубе в таблице
   const bnC = document.getElementById('bottlenecksCanvas');
   bnC.addEventListener('mousemove', ev => {{
     const m = bnC._meta; if (!m) return;
@@ -1594,13 +2607,76 @@ function attachInteractiveCrosshairs() {{
       const d = Math.hypot(m.xOf(p.v || 0) - mx, m.yOf(p.i || 0) - my);
       if (d < bestD) {{ bestD = d; best = p; }}
     }});
+    bnC._hoveredPipe = best;
     if (best) {{
+      bnC.style.cursor = 'pointer';
       drawBottlenecksChart({{ px: m.xOf(best.v || 0), py: m.yOf(best.i || 0), xVal: best.v || 0, yVal: best.i || 0 }});
-      showChartTooltip(ev, `<b>Участок #${{best.clean_id}}</b> (D=${{best.d}} мм, L=${{best.l}} м)<br>Скорость V: <b>${{best.v}} м/с</b><br>Уд. потери i: <b>${{best.i}} м/км</b><br>Коэфф. C: ${{best.c}}`);
+      showChartTooltip(ev, `<b>Участок #${{best.clean_id}}</b> (D=${{best.d}} мм, L=${{best.l}} м)<br>Скорость V: <b>${{best.v}} м/с</b> • Потери i: <b>${{best.i}} м/км</b><br><span style="color:#38bdf8">Кликните для перехода к строке в таблице ↓</span>`);
+    }} else {{
+      bnC.style.cursor = 'crosshair';
+      hideChartTooltip();
+      drawBottlenecksChart();
+    }}
+  }});
+  bnC.addEventListener('click', () => {{
+    if (bnC._hoveredPipe && bnC._hoveredPipe.clean_id) {{
+      jumpToTableRowFromChart('pipes', bnC._hoveredPipe.clean_id);
     }}
   }});
   bnC.addEventListener('mouseleave', () => {{ hideChartTooltip(); drawBottlenecksChart(); }});
 
+  // 4. Круговая диаграмма скоростей: анимация при наведении на сектор или легенду + клик для фильтрации таблицы труб
+  const stC = document.getElementById('stagnationCanvas');
+  if (stC) {{
+    function hitTestPieOrLegend(ev) {{
+      const m = stC._meta; if (!m) return -1;
+      const rect = stC.getBoundingClientRect();
+      const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+      for (const lb of (m.legendBoxes || [])) {{
+        if (mx >= lb.x && mx <= lb.x + lb.w && my >= lb.y && my <= lb.y + lb.h) return lb.idx;
+      }}
+      const dx = mx - m.cx, dy = my - m.cy;
+      const dist = Math.hypot(dx, dy);
+      if (dist >= m.innerR && dist <= m.outerR + 10) {{
+        let ang = Math.atan2(dy, dx);
+        if (ang < -Math.PI / 2) ang += Math.PI * 2;
+        for (const s of (m.slices || [])) {{
+          if (ang >= s.startA && ang <= s.endA && s.val > 0) return s.idx;
+        }}
+      }}
+      return -1;
+    }}
+    stC.addEventListener('mousemove', ev => {{
+      const idx = hitTestPieOrLegend(ev);
+      if (idx !== hoveredPieSliceIdx) {{
+        hoveredPieSliceIdx = idx;
+        drawStagnationChart(idx);
+      }}
+      if (idx >= 0 && stC._meta?.slices?.[idx]) {{
+        const sl = stC._meta.slices[idx];
+        stC.style.cursor = 'pointer';
+        showChartTooltip(ev, `<b>${{sl.label}}</b><br>Участков: <b>${{sl.val}} шт. (${{(sl.ratio * 100).toFixed(1)}}%)</b><br><span style="color:#38bdf8">Нажмите для фильтрации этих труб в таблице ↓</span>`);
+      }} else {{
+        stC.style.cursor = 'default';
+        hideChartTooltip();
+      }}
+    }});
+    stC.addEventListener('click', ev => {{
+      const idx = hitTestPieOrLegend(ev);
+      if (idx >= 0 && stC._meta?.slices?.[idx]) {{
+        const sl = stC._meta.slices[idx];
+        applyTablePresetAndHighlight('pipes', sl.filterCode, 'velocity_max_m_s', 'desc', [], null, sl.label);
+        document.getElementById('tablesSection').scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      }}
+    }});
+    stC.addEventListener('mouseleave', () => {{
+      hoveredPieSliceIdx = -1;
+      hideChartTooltip();
+      drawStagnationChart(-1);
+    }});
+  }}
+
+  // 5. Клапаны и Суточный баланс
   const vC = document.getElementById('valvesCanvas');
   if (vC) {{
     vC.addEventListener('mousemove', ev => {{
@@ -1611,9 +2687,9 @@ function attachInteractiveCrosshairs() {{
       const idx = Math.max(0, Math.min(m.n - 1, Math.round(((mx - m.pad.l) / m.pw) * (m.n - 1))));
       const s0 = m.series[0];
       const yVal = s0.data[idx] || 0;
-      const lbl = (DATA.step_labels || [])[idx] || `R${{idx}}`;
+      const lbl = (DATA.hours_labels || [])[idx] || `${{String(idx).padStart(2, '0')}}:00`;
       drawValvesChart({{ px: m.xOf(idx), py: m.yOf(yVal), xLabel: lbl, yVal }});
-      showChartTooltip(ev, `<b>Шаг ${{lbl}}</b><br>` + m.series.map(s => `${{s.label}}: <b>${{s.data[idx]}} м³/ч</b>`).join('<br>'));
+      showChartTooltip(ev, `<b>Время ${{lbl}}</b><br>` + m.series.map(s => `${{s.label}}: <b>${{s.data[idx]}} м³/ч</b>`).join('<br>'));
     }});
     vC.addEventListener('mouseleave', () => {{ hideChartTooltip(); drawValvesChart(); }});
   }}
@@ -1627,8 +2703,9 @@ function attachInteractiveCrosshairs() {{
       if (mx < m.pad.l || mx > m.pad.l + m.pw || my < m.pad.t || my > m.pad.t + m.ph) {{ hideChartTooltip(); drawDiurnalFlows(); return; }}
       const idx = Math.max(0, Math.min(m.n - 1, Math.round(((mx - m.pad.l) / m.pw) * (m.n - 1))));
       const yVal = (m.dem && m.dem[idx]) || (m.pmp && m.pmp[idx]) || 0;
-      drawDiurnalFlows({{ px: m.xOf(idx), py: m.yOf(yVal), xLabel: `${{idx}}:00`, yVal }});
-      showChartTooltip(ev, `<b>Время ${{idx}}:00</b><br>Потребление: <b>${{m.dem ? m.dem[idx] : '—'}} м³/ч</b><br>Подача насосов: <b>${{m.pmp ? m.pmp[idx] : '—'}} м³/ч</b>`);
+      const lbl = `${{String(idx).padStart(2, '0')}}:00`;
+      drawDiurnalFlows({{ px: m.xOf(idx), py: m.yOf(yVal), xLabel: lbl, yVal }});
+      showChartTooltip(ev, `<b>Время ${{lbl}}</b><br><span style="color:#38bdf8">●</span> Потребление сети: <b>${{m.dem ? m.dem[idx] : '—'}} м³/ч</b><br><span style="color:#2dd4bf">●</span> Подача насосов: <b>${{m.pmp ? m.pmp[idx] : '—'}} м³/ч</b>`);
     }});
     dfC.addEventListener('mouseleave', () => {{ hideChartTooltip(); drawDiurnalFlows(); }});
   }}
@@ -1642,15 +2719,27 @@ window.addEventListener('DOMContentLoaded', () => {{
     opt.textContent = `${{c.clean_id}} ${{c.is_borehole ? '[Скважинный]' : '[Сетевой]'}} ${{c.active ? '[РАБ]' : '[ВЫКЛ]'}}`;
     sel.appendChild(opt);
   }});
+  initTimelineTicks();
   drawQHCurve(0);
   drawPressureBand();
   drawBottlenecksChart();
-  drawStagnationChart();
+  drawStagnationChart(-1);
   drawValvesChart();
   drawDiurnalFlows();
   mapFit();
+  renderTableFilters();
   renderTable();
   attachInteractiveCrosshairs();
+}});
+
+window.addEventListener('resize', () => {{
+  drawQHCurve(currentQHIndex);
+  drawPressureBand();
+  drawBottlenecksChart();
+  drawStagnationChart(hoveredPieSliceIdx);
+  drawValvesChart();
+  drawDiurnalFlows();
+  redrawMap();
 }});
 </script>
 </body>
@@ -1661,3 +2750,7 @@ window.addEventListener('DOMContentLoaded', () => {{
         out_p.parent.mkdir(parents=True, exist_ok=True)
         out_p.write_text(html_doc, encoding="utf-8")
     return html_doc
+
+
+build_interactive_html_report = render_standalone_html_report
+

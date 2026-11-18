@@ -1,4 +1,4 @@
-"""Модуль интеграции онтологии ПК «Аквабит» (EPANET-AI v3, строго RDF Turtle)."""
+"""Модуль интеграции онтологии ПК «Аквабит» (EPANET-AI v3.2, строго RDF Turtle + графовый контекст для ИИ)."""
 
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def parse_turtle_ontology(ttl_path: Path) -> dict[str, Any]:
 
     rules: list[dict[str, Any]] = []
     domains: dict[str, dict[str, Any]] = {}
-    version_info = "3.1.0"
+    version_info = "3.2.0"
 
     for stmt in statements:
         if stmt.startswith("@prefix"):
@@ -166,8 +166,14 @@ def load_hydraulic_ontology(ontology_path: str | Path | None = None) -> dict[str
     candidates = [
         Path(ontology_path) if ontology_path else None,
         DEFAULT_ONTOLOGY_TTL,
+        Path("data/aquabit_hydraulic_ontology_v3.ttl"),
+        Path(__file__).resolve().parent.parent / "data" / "aquabit_hydraulic_ontology_v3.ttl",
         Path(__file__).resolve().parent.parent.parent / "data" / "aquabit_hydraulic_ontology_v3.ttl",
     ]
+    for data_dir in (Path("data"), Path(__file__).resolve().parent.parent / "data"):
+        if data_dir.exists() and data_dir.is_dir():
+            candidates.extend(sorted(data_dir.glob("*.ttl")))
+
     for p in candidates:
         if p and p.exists() and p.is_file():
             try:
@@ -246,8 +252,9 @@ def evaluate_ontology_rules(facts: dict[str, Any], ontology: dict[str, Any]) -> 
     # R04: Гидравлические узкие места (V >= 5 м/с или i >= 15 м/км)
     high_loss = [p for p in ppa.get("top_high_loss_pipes", []) if (p.get("velocity_max_m_s") or 0) >= 5.0 or (p.get("headloss_gradient_m_km") or 0) >= 15.0]
     if high_loss:
-        objs = ", ".join(
-            f"{clean_object_id(p.get('pipe_id'))} (i={p.get('headloss_gradient_m_km')} м/км, V={p.get('velocity_max_m_s')} м/с)"
+        bneck_total = ppa.get("bottleneck_pipes_count") or len(high_loss)
+        objs = f"Всего {bneck_total} участков: " + ", ".join(
+            f"{clean_object_id(p.get('pipe_id'))} (узлы {p.get('start_node')}→{p.get('end_node')}, i={p.get('headloss_gradient_m_km')} м/км, V={p.get('velocity_max_m_s')} м/с)"
             for p in high_loss[:3]
         )
         add_rule(
@@ -273,11 +280,14 @@ def evaluate_ontology_rules(facts: dict[str, Any], ontology: dict[str, Any]) -> 
     # R06: Недогрузка сетевых/повысительных насосов
     booster_under = [p for p in pma.get("underloaded_pumps", []) if not p.get("is_borehole")]
     if booster_under:
-        objs = ", ".join(clean_object_id(p.get("pump_id")) for p in booster_under[:4])
+        objs = ", ".join(
+            f"{clean_object_id(p.get('pump_id'))} (коллектор #{p.get('end_node')}, Pвых={p.get('collector_pressure_m')}м)"
+            for p in booster_under[:4]
+        )
         add_rule(
             "R06_BOOSTER_PUMP_UNDERLOAD_VALVE_CHECK",
             objs,
-            "Недогрузка сетевого насоса (проверка задвижек)",
+            "Недогрузка сетевого насоса (повышенное сопротивление за напорным узлом)",
             "pump_imbalance",
             fallback_sev="medium",
             fallback_prio=2,
@@ -286,11 +296,14 @@ def evaluate_ontology_rules(facts: dict[str, Any], ontology: dict[str, Any]) -> 
     # R07: Недогрузка скважинных насосов
     borehole_under = [p for p in pma.get("underloaded_pumps", []) if p.get("is_borehole")]
     if borehole_under:
-        objs = ", ".join(clean_object_id(p.get("pump_id")) for p in borehole_under[:4])
+        objs = ", ".join(
+            f"{clean_object_id(p.get('pump_id'))} (скважина #{p.get('start_node')} → коллектор #{p.get('end_node')}, Pвых={p.get('collector_pressure_m')}м)"
+            for p in borehole_under[:4]
+        )
         add_rule(
             "R07_BOREHOLE_PUMP_UNDERLOAD",
             objs,
-            "Недогрузка скважинного насоса (динамический уровень в скважине, без входных задвижек)",
+            "Недогрузка скважинного насоса (перепад высот со скважиной или противодавление коллектора)",
             "pump_imbalance",
             fallback_sev="medium",
             fallback_prio=2,
@@ -299,11 +312,14 @@ def evaluate_ontology_rules(facts: dict[str, Any], ontology: dict[str, Any]) -> 
     # R08: Перегрузка насосов (> 115% Q_ном)
     overloaded = pma.get("overloaded_pumps", [])
     if overloaded:
-        objs = ", ".join(f"{clean_object_id(p.get('pump_id'))} [{p.get('pump_type')}]" for p in overloaded[:4])
+        objs = ", ".join(
+            f"{clean_object_id(p.get('pump_id'))} [{p.get('pump_type')}, узел #{p.get('end_node')} P={p.get('collector_pressure_m')}м]"
+            for p in overloaded[:4]
+        )
         add_rule(
             "R08_PUMP_OVERLOAD_OUTLET_REGULATION",
             objs,
-            "Перегрузка насоса (снижение подачи уменьшением давления на выходе)",
+            "Работа насоса правее зоны BEP (регулирование давления на нагнетании)",
             "pump_imbalance",
             fallback_sev="high",
             fallback_prio=2,
@@ -446,6 +462,7 @@ def analyze_problem_domains(
     t_vs, dash_vs = dom_meta("valves_and_storage", "Работа регулирующих клапанов (PRV/PSV), источников и резервуаров РЧВ", "valvesSection")
     t_di, dash_di = dom_meta("diurnal_imbalance", "Суточный баланс подачи насосов и реального водопотребления сети", "diurnalSection")
 
+    bneck_cnt = ppa.get("bottleneck_pipes_count") or len(ppa.get("top_high_loss_pipes", []))
     domains: dict[str, dict[str, Any]] = {
         "pressure_deficit": {
             "score": 0,
@@ -462,13 +479,13 @@ def analyze_problem_domains(
             "score": 0,
             "title": t_pm,
             "details": f"Скважинных: {pma.get('borehole_total_count', 0)}, недогрузка: {len(pma.get('underloaded_pumps', []))}, перегрузка: {len(pma.get('overloaded_pumps', []))}",
-            "worst_items": pma.get("overloaded_pumps", []) + pma.get("underloaded_pumps", []),
+            "worst_items": pma.get("overloaded_pumps", [])[:3] + pma.get("underloaded_pumps", [])[:3],
             "recommended_dashboard": dash_pm,
         },
         "hydraulic_bottlenecks": {
             "score": 0,
             "title": t_hb,
-            "details": f"Макс. потери {max((p.get('headloss_gradient_m_km') or 0 for p in ppa.get('top_high_loss_pipes', [])), default=0):.1f} м/км",
+            "details": f"Участков с потерями: {bneck_cnt} шт., макс. потери {max((p.get('headloss_gradient_m_km') or 0 for p in ppa.get('top_high_loss_pipes', [])), default=0):.1f} м/км",
             "worst_items": ppa.get("top_high_loss_pipes", [])[:5],
             "recommended_dashboard": dash_hb,
         },
@@ -535,6 +552,119 @@ def analyze_problem_domains(
     }
 
 
+def build_enriched_ai_context(
+    facts: dict[str, Any],
+    arg2: Any = None,
+    arg3: Any = None,
+) -> dict[str, Any]:
+    """Формирует обогащенный графовый контекст для LLM (с цепочками Скважина -> Насос -> Коллектор -> Труба),
+    позволяющий модели делать однозначные инженерные выводы без гадания.
+    Поддерживает вызов как (facts, triggered_rules, problem_domains), так и (facts, ranked_domains, triggered_rules)."""
+    pa = facts.get("pressure_analysis", {})
+    ppa = facts.get("pipes_analysis", {})
+    pma = facts.get("pumps_analysis", {})
+    under = pma.get("underloaded_pumps", [])
+    over = pma.get("overloaded_pumps", [])
+
+    ranked_domains: list[dict[str, Any]] = []
+    triggered_rules: list[dict[str, Any]] = []
+
+    for candidate in (arg2, arg3):
+        if isinstance(candidate, dict) and "ranked_domains" in candidate:
+            ranked_domains = candidate.get("ranked_domains") or []
+        elif isinstance(candidate, list) and candidate:
+            first = candidate[0]
+            if isinstance(first, dict) and ("domain" in first or "score" in first):
+                ranked_domains = candidate
+            elif isinstance(first, dict) and ("rule_id" in first or "diagnosis" in first):
+                triggered_rules = candidate
+
+    def compact_pump(p: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "pump_id": p.get("clean_id"),
+            "type": p.get("pump_type"),
+            "source_or_start_node": p.get("start_node"),
+            "source_head_m": p.get("source_head_m"),
+            "collector_end_node": p.get("end_node"),
+            "collector_pressure_m": p.get("collector_pressure_m"),
+            "collector_elevation_m": p.get("collector_elevation_m"),
+            "connected_out_pipe_id": p.get("connected_out_pipe_id"),
+            "connected_out_pipe_loss_m_km": p.get("connected_out_pipe_loss"),
+            "q_work_m3_h": p.get("q_working_m3_h"),
+            "q_nom_m3_h": p.get("q_nominal_m3_h"),
+            "h_work_m": p.get("h_working_m"),
+            "exact_diagnosis": p.get("diagnostic_advice"),
+        }
+
+    return {
+        "city": facts.get("city_name"),
+        "ranked_problem_domains": [
+            {
+                "domain": d.get("domain", ""),
+                "score": d.get("score", 0),
+                "title": d.get("title", ""),
+                "details": d.get("details", ""),
+            }
+            for d in ranked_domains
+            if isinstance(d, dict)
+        ],
+        "activated_ontology_rules": triggered_rules,
+        "unique_anomalies": facts.get("unique_model_anomalies", []),
+        "water_balance": facts.get("water_balance"),
+        "pressure_kpi": pa.get("pressure_bins"),
+        "worst_deficit_nodes_with_pipes": [
+            {
+                "node_id": r.get("clean_id"),
+                "z_m": r.get("elevation_m"),
+                "floors": r.get("floors"),
+                "p_min_m": r.get("free_pressure_min_m"),
+                "dp_deficit_m": r.get("pressure_surplus_deficit_m"),
+                "connected_pipes": r.get("connected_pipe_ids"),
+                "diagnosis": r.get("diagnostic_advice"),
+            }
+            for r in pa.get("worst_deficit_nodes", [])[:4]
+        ],
+        "worst_data_error_nodes": [
+            {
+                "node_id": r.get("clean_id"),
+                "z_m": r.get("elevation_m"),
+                "p_min_m": r.get("free_pressure_min_m"),
+                "connected_pipes": r.get("connected_pipe_ids"),
+                "diagnosis": r.get("diagnostic_advice"),
+            }
+            for r in pa.get("worst_data_error_nodes", [])[:4]
+        ],
+        "bottleneck_pipes_kpi": {
+            "total_bottleneck_pipes_count": ppa.get("bottleneck_pipes_count", 0),
+            "closed_pipes_count": ppa.get("closed_zero_flow_pipes_count", 0),
+            "stagnant_pipes_count": ppa.get("low_velocity_under_01ms_count", 0),
+            "top_bottlenecks": [
+                {
+                    "pipe_id": p.get("clean_id"),
+                    "start_node": p.get("start_node"),
+                    "end_node": p.get("end_node"),
+                    "d_mm": p.get("diameter_mm"),
+                    "c_hw": p.get("hazen_williams_c"),
+                    "v_m_s": p.get("velocity_max_m_s"),
+                    "i_m_km": p.get("headloss_gradient_m_km"),
+                    "diagnosis": p.get("diagnostic_advice"),
+                }
+                for p in ppa.get("top_high_loss_pipes", [])[:4]
+            ],
+        },
+        "pumps_causal_chains": {
+            "total_pumps": pma.get("total_pumps"),
+            "active_pumps": pma.get("active_pumps_count"),
+            "borehole_pumps": pma.get("borehole_total_count"),
+            "underloaded_count": len(under),
+            "overloaded_count": len(over),
+            "sample_underloaded_borehole": [compact_pump(p) for p in under if p.get("is_borehole")][:3],
+            "sample_underloaded_booster": [compact_pump(p) for p in under if not p.get("is_borehole")][:3],
+            "sample_overloaded": [compact_pump(p) for p in over[:3]],
+        },
+    }
+
+
 def build_ontology_ai_system_prompt(ontology: dict[str, Any]) -> str:
     rules = ontology.get("diagnostic_rules", [])
     rules_digest = "\n".join(
@@ -544,27 +674,32 @@ def build_ontology_ai_system_prompt(ontology: dict[str, Any]) -> str:
     onto_block = f"\nАКТИВНАЯ БАЗА ПРАВИЛ ОНТОЛОГИИ (RDF Turtle):\n{rules_digest}\n" if rules_digest else ""
 
     return (
-        "Ты — главный инженер-аналитик систем водоснабжения (EPANET-AI v3).\n"
-        "Твоя задача — самостоятельно определить структуру и акценты отчета под конкретный город, "
-        "описывая общую гидравлическую картину города, интерпретацию графиков и таблиц, "
-        "разбирая только самые яркие аномалии (почему они возникли и как их исправить) без перегрузки текста сырыми списками чисел.\n\n"
-        "СТРОГИЕ ПРАВИЛА ИНЖЕНЕРНОЙ ЛОГИКИ И ОНТОЛОГИИ:\n"
-        "1. ИИ САМ ВЫБИРАЕТ СТРУКТУРУ ОТЧЕТА: Начинай отчет с `# ИИ отчет`. Сформируй разделы в том порядке, который соответствует главным проблемам данного города.\n"
-        "2. МЕНЬШЕ СЫРЫХ ДАННЫХ — БОЛЬШЕ ОБЩЕЙ КАРТИНЫ И ВЫВОДОВ: Не перечисляй длинные списки узлов и труб. Опиши макрокартину города, свяжи выводы с графиками и таблицами отчета и разбери лишь 1–2 самые яркие аномалии в каждой категории.\n"
-        "3. ПРАВИЛА ПО НАСОСАМ И СКВАЖИНАМ:\n"
-        "   - Насос является СКВАЖИННЫМ, если его начальный узел — это Источник. Указывай скважинные насосы явно.\n"
-        "   - У скважинного насоса НЕТ задвижек на входе! Проверять наличие или открытие задвижек на входе скважинного насоса категорически некорректно — у него есть динамический уровень воды в скважине и напорная линия.\n"
-        "   - Насосы в недогрузке не могут выдать свой поток. Если недогрузка у сетевого насоса — проблема может быть в прикрытой задвижке; если у насоса ПЕРЕГРУЗКА — проблема ТОЧНО НЕ в задвижке.\n"
-        "   - Для насосов в зоне перегрузки предлагай уменьшить их подачу за счет уменьшения давления на выходе (ЧРП, регулятор на выходе), а НЕ за счет открытия задвижек на входе или отключения насосов в час пик.\n"
-        "   - Разрыв оценивай между установленной мощностью насосов и реальным расходом сети (водопотреблением).\n"
-        "4. ПРАВИЛА ПО ТРУБАМ, ДАВЛЕНИЮ И КЛАПАНАМ:\n"
-        "   - Если труба закрыта и поток не идет (Q = 0), значит поток перекрыт задвижкой.\n"
-        "   - Критический вакуум (< -3.0 м) у активного потребителя свидетельствует об отсечении ветки или ошибке отметки Z.\n"
-        "   - Избыточный напор (> 60 м по СП 31.13330.2021) требует зонирования через PRV.\n"
-        "   - Обязательно учитывай работу регулирующих клапанов (PRV, PSV, FCV из Клапан.csv и Поток Клапан.csv), источников и резервуаров РЧВ.\n"
+        "Ты — главный инженер-аналитик систем водоснабжения (EPANET-AI v3.2).\n"
+        "Твоя задача — составить точный, однозначный технический аудит гидравлической модели города, "
+        "опираясь исключительно на предвычисленные цепочки фактов (Источник -> Насос -> Приемный коллектор -> Отходящий трубопровод).\n\n"
+        "СТРОГИЕ ПРАВИЛА ИНЖЕНЕРНОЙ ТОЧНОСТИ (БЕЗ ШАБЛОНОВ И ВОДЫ):\n"
+        "1. НИКАКИХ ШАБЛОННЫХ ОГОВОРОК И ДВОЙНЫХ ОТРИЦАНИЙ: Категорически запрещено писать фразы вида "
+        "«проверять задвижки на входе некорректно (у скважины их нет)» или «проблема ТОЧНО НЕ в задвижке». "
+        "Пиши сразу конкретную физическую причину, подтвержденную числами из поля `exact_diagnosis` и параметрами смежных узлов.\n"
+        "2. ОДНОЗНАЧНЫЕ ВЫВОДЫ ВМЕСТО «ЛИБО / ЛИБО»: Не пиши «снижение уровня в скважине либо высокое противодавление в коллекторе». "
+        "Смотри на давление `collector_pressure_m` в конечном узле насоса (`collector_end_node`) и потери `connected_out_pipe_loss_m_km` в отходящей трубе (`connected_out_pipe_id`): "
+        "указывай точный ID скважины (`source_or_start_node`), точный ID узла коллектора (`collector_end_node`) с его давлением P и отметкой Z, и точный ID лимитирующей трубы!\n"
+        "3. КОНКРЕТНЫЕ МЕРОПРИЯТИЯ В СЕТИ И В ПК «АКВАБИТ»: Для каждой проблемы разделяй: "
+        "(а) инженерное мероприятие на сети (перекладка, закольцовка, настройка ЧРП/PRV) и "
+        "(б) действие в модели ПК «Аквабит» (проверка отметки Z в Узел.csv, корректировка коэффициента C или статуса трубы, проверка кривой Q-H).\n"
+        "4. ИНТЕРАКТИВНЫЕ ССЫЛКИ НА ОБЪЕКТЫ И ФИЛЬТРЫ ТАБЛИЦ:\n"
+        "   - Любой ID узла, скважины, коллектора, трубы, насоса или клапана пиши в обратных кавычках (например: узел `3459771`, коллектор `3466812`, водовод `3466703`, насос `3466811`).\n"
+        "   - Добавляй прямые ссылки для фильтрации и сортировки таблиц в формате `[Текст ссылки](filter:ТАБЛИЦА:ФИЛЬТР)`, где доступные коды:\n"
+        "     * `filter:nodes:data_error` (узлы с P < -3.0 м)\n"
+        "     * `filter:nodes:deficit` (абоненты с дефицитом ΔP < 0)\n"
+        "     * `filter:nodes:excess` (узлы с избытком P > 60 м)\n"
+        "     * `filter:pipes:bottlenecks` (узкие места с высокими потерями i)\n"
+        "     * `filter:pipes:closed` (перекрытые участки Q = 0)\n"
+        "     * `filter:pipes:stagnant` (малопроточные участки V < 0.10 м/с)\n"
+        "     * `filter:pumps:underload` (насосы в недогрузке)\n"
+        "     * `filter:pumps:overload` (насосы в перегрузке)\n"
         f"{onto_block}"
-        "5. ОБОЗНАЧЕНИЕ ОБЪЕКТОВ: Пиши чистые ID объектов в обратных кавычках (например, узел `3459771`, участок `3466703`, клапан `3678896`, насос `3575101`), чтобы они становились интерактивными кнопками.\n"
-        "6. В конце ответа выведи JSON-блок `[SELECTED_DASHBOARDS]` с ключами `section_order` (массив ID из `['qhSection', 'pressureSection', 'bottlenecksSection', 'stagnationSection', 'valvesSection', 'diurnalSection']`) и `dashboards` (`[{\"id\": \"...\"}]`).\n"
+        "5. В конце ответа выведи JSON-блок `[SELECTED_DASHBOARDS]` с ключами `section_order` (массив ID из `['qhSection', 'pressureSection', 'bottlenecksSection', 'stagnationSection', 'valvesSection', 'diurnalSection']`) и `dashboards` (`[{\"id\": \"...\"}]`).\n"
     )
 
 
