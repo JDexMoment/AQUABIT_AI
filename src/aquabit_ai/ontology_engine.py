@@ -579,127 +579,156 @@ def build_enriched_ai_context(
             elif isinstance(first, dict) and ("rule_id" in first or "diagnosis" in first):
                 triggered_rules = candidate
 
+    def _clip(val: Any, limit: int = 220) -> Any:
+        if not isinstance(val, str):
+            return val
+        s = re.sub(r"\s+", " ", val).strip()
+        return s if len(s) <= limit else (s[: limit - 1].rstrip() + "…")
+
     def compact_pump(p: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "pump_id": p.get("clean_id"),
+        raw = {
+            "id": p.get("clean_id"),
             "type": p.get("pump_type"),
-            "source_or_start_node": p.get("start_node"),
-            "source_head_m": p.get("source_head_m"),
-            "collector_end_node": p.get("end_node"),
-            "collector_pressure_m": p.get("collector_pressure_m"),
-            "collector_elevation_m": p.get("collector_elevation_m"),
-            "connected_out_pipe_id": p.get("connected_out_pipe_id"),
-            "connected_out_pipe_loss_m_km": p.get("connected_out_pipe_loss"),
-            "q_work_m3_h": p.get("q_working_m3_h"),
-            "q_nom_m3_h": p.get("q_nominal_m3_h"),
-            "h_work_m": p.get("h_working_m"),
-            "exact_diagnosis": p.get("diagnostic_advice"),
+            "src_node": p.get("start_node"),
+            "src_head_m": p.get("source_head_m"),
+            "end_node": p.get("end_node"),
+            "end_p_m": p.get("collector_pressure_m"),
+            "end_z_m": p.get("collector_elevation_m"),
+            "out_pipe": p.get("connected_out_pipe_id"),
+            "out_i_m_km": p.get("connected_out_pipe_loss"),
+            "q_work": p.get("q_working_m3_h"),
+            "q_nom": p.get("q_nominal_m3_h"),
+            "h_work": p.get("h_working_m"),
+            "diag": _clip(p.get("diagnostic_advice"), 200),
         }
+        return {k: v for k, v in raw.items() if v is not None and v != ""}
+
+    compact_rules = [
+        {
+            "id": r.get("rule_id"),
+            "sev": r.get("severity"),
+            "dom": r.get("problem_domain"),
+            "diag": _clip(r.get("diagnosis"), 140),
+            "objs": _clip(r.get("matched_objects"), 180),
+        }
+        for r in triggered_rules[:10]
+        if isinstance(r, dict)
+    ]
+
+    wb_raw = facts.get("water_balance") or {}
+    compact_wb = {
+        k: wb_raw[k]
+        for k in (
+            "total_nodes_in_model",
+            "active_consumer_nodes",
+            "total_daily_consumption_m3_day",
+            "peak_network_demand_m3_h",
+            "peak_factor_k_hour",
+            "pumps_installed_capacity_m3_h",
+            "pumps_peak_actual_flow_m3_h",
+            "installed_vs_demand_flow_gap_m3_h",
+        )
+        if k in wb_raw and wb_raw[k] is not None
+    }
 
     return {
         "city": facts.get("city_name"),
-        "ranked_problem_domains": [
+        "ranked_domains": [
             {
                 "domain": d.get("domain", ""),
-                "score": d.get("score", 0),
-                "title": d.get("title", ""),
-                "details": d.get("details", ""),
+                "score": round(float(d.get("score", 0)), 1),
+                "title": _clip(d.get("title", ""), 90),
+                "details": _clip(d.get("details", ""), 140),
             }
-            for d in ranked_domains
+            for d in ranked_domains[:6]
             if isinstance(d, dict)
         ],
-        "activated_ontology_rules": triggered_rules,
-        "unique_anomalies": facts.get("unique_model_anomalies", []),
-        "water_balance": facts.get("water_balance"),
+        "triggered_rules": compact_rules,
+        "anomalies": [_clip(a, 180) for a in (facts.get("unique_model_anomalies") or [])[:4]],
+        "water_balance": compact_wb,
         "pressure_kpi": pa.get("pressure_bins"),
-        "worst_deficit_nodes_with_pipes": [
+        "worst_deficit_nodes": [
             {
-                "node_id": r.get("clean_id"),
-                "z_m": r.get("elevation_m"),
+                "id": r.get("clean_id"),
+                "z": r.get("elevation_m"),
                 "floors": r.get("floors"),
-                "p_min_m": r.get("free_pressure_min_m"),
-                "dp_deficit_m": r.get("pressure_surplus_deficit_m"),
-                "connected_pipes": r.get("connected_pipe_ids"),
-                "diagnosis": r.get("diagnostic_advice"),
+                "p_min": r.get("free_pressure_min_m"),
+                "dp": r.get("pressure_surplus_deficit_m"),
+                "pipes": (r.get("connected_pipe_ids") or [])[:4],
+                "diag": _clip(r.get("diagnostic_advice"), 160),
             }
             for r in pa.get("worst_deficit_nodes", [])[:4]
         ],
         "worst_data_error_nodes": [
             {
-                "node_id": r.get("clean_id"),
-                "z_m": r.get("elevation_m"),
-                "p_min_m": r.get("free_pressure_min_m"),
-                "connected_pipes": r.get("connected_pipe_ids"),
-                "diagnosis": r.get("diagnostic_advice"),
+                "id": r.get("clean_id"),
+                "z": r.get("elevation_m"),
+                "p_min": r.get("free_pressure_min_m"),
+                "pipes": (r.get("connected_pipe_ids") or [])[:4],
+                "diag": _clip(r.get("diagnostic_advice"), 160),
             }
             for r in pa.get("worst_data_error_nodes", [])[:4]
         ],
-        "bottleneck_pipes_kpi": {
-            "total_bottleneck_pipes_count": ppa.get("bottleneck_pipes_count", 0),
-            "closed_pipes_count": ppa.get("closed_zero_flow_pipes_count", 0),
-            "stagnant_pipes_count": ppa.get("low_velocity_under_01ms_count", 0),
-            "top_bottlenecks": [
+        "bottlenecks": {
+            "total_count": ppa.get("bottleneck_pipes_count", 0),
+            "closed_count": ppa.get("closed_zero_flow_pipes_count", 0),
+            "stagnant_count": ppa.get("low_velocity_under_01ms_count", 0),
+            "top_pipes": [
                 {
-                    "pipe_id": p.get("clean_id"),
-                    "start_node": p.get("start_node"),
-                    "end_node": p.get("end_node"),
+                    "id": p.get("clean_id"),
+                    "from": p.get("start_node"),
+                    "to": p.get("end_node"),
                     "d_mm": p.get("diameter_mm"),
-                    "c_hw": p.get("hazen_williams_c"),
-                    "v_m_s": p.get("velocity_max_m_s"),
-                    "i_m_km": p.get("headloss_gradient_m_km"),
-                    "diagnosis": p.get("diagnostic_advice"),
+                    "c": p.get("hazen_williams_c"),
+                    "v": p.get("velocity_max_m_s"),
+                    "i": p.get("headloss_gradient_m_km"),
+                    "diag": _clip(p.get("diagnostic_advice"), 150),
                 }
                 for p in ppa.get("top_high_loss_pipes", [])[:4]
             ],
         },
-        "pumps_causal_chains": {
-            "total_pumps": pma.get("total_pumps"),
-            "active_pumps": pma.get("active_pumps_count"),
-            "borehole_pumps": pma.get("borehole_total_count"),
-            "underloaded_count": len(under),
-            "overloaded_count": len(over),
-            "sample_underloaded_borehole": [compact_pump(p) for p in under if p.get("is_borehole")][:3],
-            "sample_underloaded_booster": [compact_pump(p) for p in under if not p.get("is_borehole")][:3],
-            "sample_overloaded": [compact_pump(p) for p in over[:3]],
+        "pumps_chains": {
+            "total": pma.get("total_pumps"),
+            "active": pma.get("active_pumps_count"),
+            "borehole": pma.get("borehole_total_count"),
+            "underloaded": len(under),
+            "overloaded": len(over),
+            "under_borehole": [compact_pump(p) for p in under if p.get("is_borehole")][:3],
+            "under_booster": [compact_pump(p) for p in under if not p.get("is_borehole")][:3],
+            "overloaded_sample": [compact_pump(p) for p in over[:3]],
         },
     }
 
 
 def build_ontology_ai_system_prompt(ontology: dict[str, Any]) -> str:
     rules = ontology.get("diagnostic_rules", [])
+
+    def _short(s: Any, lim: int = 120) -> str:
+        t = re.sub(r"\s+", " ", str(s or "")).strip()
+        return t if len(t) <= lim else (t[: lim - 1].rstrip() + "…")
+
     rules_digest = "\n".join(
-        f"   - [{r.get('rule_id')}, приор. {r.get('priority')}] {r.get('diagnosis')} -> {r.get('action_in_model')}"
-        for r in sorted(rules, key=lambda x: x.get("priority", 9))[:17]
+        f"- [{r.get('rule_id')}] {_short(r.get('diagnosis'), 95)} -> {_short(r.get('action_in_model'), 115)}"
+        for r in sorted(rules, key=lambda x: x.get("priority", 9))[:12]
     )
-    onto_block = f"\nАКТИВНАЯ БАЗА ПРАВИЛ ОНТОЛОГИИ (RDF Turtle):\n{rules_digest}\n" if rules_digest else ""
+    onto_block = f"\nКРАТКАЯ ОНТОЛОГИЯ (RDF Turtle):\n{rules_digest}\n" if rules_digest else ""
 
     return (
         "Ты — главный инженер-аналитик систем водоснабжения (EPANET-AI v3.2).\n"
-        "Твоя задача — составить точный, однозначный технический аудит гидравлической модели города, "
-        "опираясь исключительно на предвычисленные цепочки фактов (Источник -> Насос -> Приемный коллектор -> Отходящий трубопровод).\n\n"
-        "СТРОГИЕ ПРАВИЛА ИНЖЕНЕРНОЙ ТОЧНОСТИ (БЕЗ ШАБЛОНОВ И ВОДЫ):\n"
-        "1. НИКАКИХ ШАБЛОННЫХ ОГОВОРОК И ДВОЙНЫХ ОТРИЦАНИЙ: Категорически запрещено писать фразы вида "
-        "«проверять задвижки на входе некорректно (у скважины их нет)» или «проблема ТОЧНО НЕ в задвижке». "
-        "Пиши сразу конкретную физическую причину, подтвержденную числами из поля `exact_diagnosis` и параметрами смежных узлов.\n"
-        "2. ОДНОЗНАЧНЫЕ ВЫВОДЫ ВМЕСТО «ЛИБО / ЛИБО»: Не пиши «снижение уровня в скважине либо высокое противодавление в коллекторе». "
-        "Смотри на давление `collector_pressure_m` в конечном узле насоса (`collector_end_node`) и потери `connected_out_pipe_loss_m_km` в отходящей трубе (`connected_out_pipe_id`): "
-        "указывай точный ID скважины (`source_or_start_node`), точный ID узла коллектора (`collector_end_node`) с его давлением P и отметкой Z, и точный ID лимитирующей трубы!\n"
-        "3. КОНКРЕТНЫЕ МЕРОПРИЯТИЯ В СЕТИ И В ПК «АКВАБИТ»: Для каждой проблемы разделяй: "
-        "(а) инженерное мероприятие на сети (перекладка, закольцовка, настройка ЧРП/PRV) и "
-        "(б) действие в модели ПК «Аквабит» (проверка отметки Z в Узел.csv, корректировка коэффициента C или статуса трубы, проверка кривой Q-H).\n"
-        "4. ИНТЕРАКТИВНЫЕ ССЫЛКИ НА ОБЪЕКТЫ И ФИЛЬТРЫ ТАБЛИЦ:\n"
-        "   - Любой ID узла, скважины, коллектора, трубы, насоса или клапана пиши в обратных кавычках (например: узел `3459771`, коллектор `3466812`, водовод `3466703`, насос `3466811`).\n"
-        "   - Добавляй прямые ссылки для фильтрации и сортировки таблиц в формате `[Текст ссылки](filter:ТАБЛИЦА:ФИЛЬТР)`, где доступные коды:\n"
-        "     * `filter:nodes:data_error` (узлы с P < -3.0 м)\n"
-        "     * `filter:nodes:deficit` (абоненты с дефицитом ΔP < 0)\n"
-        "     * `filter:nodes:excess` (узлы с избытком P > 60 м)\n"
-        "     * `filter:pipes:bottlenecks` (узкие места с высокими потерями i)\n"
-        "     * `filter:pipes:closed` (перекрытые участки Q = 0)\n"
-        "     * `filter:pipes:stagnant` (малопроточные участки V < 0.10 м/с)\n"
-        "     * `filter:pumps:underload` (насосы в недогрузке)\n"
-        "     * `filter:pumps:overload` (насосы в перегрузке)\n"
+        "Составь точный технический аудит модели города по цепочкам фактов (Источник -> Насос -> Коллектор -> Отходящая труба).\n\n"
+        "ПРАВИЛА ИНЖЕНЕРНОЙ ТОЧНОСТИ:\n"
+        "1. Без шаблонных оговорок и двойных отрицаний: не пиши фразы «у скважины нет задвижки» или «проблема ТОЧНО НЕ в задвижке». Сразу называй физическую причину по полям `diag`, `end_p_m`, `out_i_m_km`.\n"
+        "2. Однозначные выводы вместо «либо/либо»: указывай точный ID скважины/узла (`src_node`), ID коллектора (`end_node`, его P и Z) и ID лимитирующей трубы (`out_pipe`).\n"
+        "3. Для каждой проблемы разделяй: (а) инженерное мероприятие на сети и (б) действие в ПК «Аквабит».\n"
+        "4. Интерактивные ссылки (выбирай цель по контексту):\n"
+        "   - Если нужно сравнить параметры объекта с другими в таблице (давление, потери, Q-H, уставки) — указывай ID как `#ID` или `[узел #ID](table:ID)` (ведет прямо на строку в таблице).\n"
+        "   - Если важно именно пространственное расположение, район, ветка или соседство на схеме — пиши `[узел #ID на карте](map:ID)` (ведет сразу на карту).\n"
+        "   - Для проблемных групп обязательно вставляй фильтр-ссылки на таблицу вида `[Показать узлы с вакуумом](filter:nodes:data_error)`. Доступные фильтры: "
+        "`filter:nodes:data_error`, `filter:nodes:deficit`, `filter:nodes:excess`, "
+        "`filter:pipes:bottlenecks`, `filter:pipes:closed`, `filter:pipes:stagnant`, "
+        "`filter:pumps:underload`, `filter:pumps:overload`.\n"
         f"{onto_block}"
-        "5. В конце ответа выведи JSON-блок `[SELECTED_DASHBOARDS]` с ключами `section_order` (массив ID из `['qhSection', 'pressureSection', 'bottlenecksSection', 'stagnationSection', 'valvesSection', 'diurnalSection']`) и `dashboards` (`[{\"id\": \"...\"}]`).\n"
+        "5. В конце ответа выведи JSON-блок `[SELECTED_DASHBOARDS]` с ключами `section_order` (из `['qhSection', 'pressureSection', 'bottlenecksSection', 'stagnationSection', 'valvesSection', 'diurnalSection']`) и `dashboards` (`[{\"id\": \"...\"}]`).\n"
     )
 
 

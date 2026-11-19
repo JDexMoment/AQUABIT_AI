@@ -222,6 +222,11 @@ def _markdown_to_clean_html(md: str) -> str:
     in_ul = False
     in_ol = False
 
+    _MAP_CONTEXT_RE = re.compile(
+        r"(на\s+карт|располож|местополож|географ|район|схем[еуа]\s+сет|рядом\s+с|вблизи|маршрут|ветк[иаеу]|контур)",
+        flags=re.IGNORECASE,
+    )
+
     def close_lists():
         nonlocal in_ul, in_ol
         if in_ul:
@@ -233,15 +238,56 @@ def _markdown_to_clean_html(md: str) -> str:
 
     def format_inline(text_line: str) -> str:
         s_escaped = html.escape(text_line)
-        # Поддержка ссылок автофильтрации таблиц: [Текст](filter:nodes:data_error)
+        # 1) Ссылки автофильтрации таблиц: [Текст](filter:nodes:data_error)
         s_escaped = re.sub(
             r"\[([^\]]+)\]\(filter:([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\)",
             r'<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI(\'\2\', \'\3\')" title="Применить фильтр и сортировку в таблице">\1 ↗</button>',
             s_escaped,
         )
+        # 2) Явные ссылки на таблицу: [Текст](table:3466703)
+        s_escaped = re.sub(
+            r"\[([^\]]+)\]\(table:#?([ceputvk]?\d+)\)",
+            lambda m: f'<button type="button" class="object-link" data-table-id="{clean_object_id(m.group(2))}" title="Открыть объект #{clean_object_id(m.group(2))} в таблице">{m.group(1)}</button>',
+            s_escaped,
+            flags=re.IGNORECASE,
+        )
+        # 3) Явные ссылки на карту: [Текст](map:3466703)
+        s_escaped = re.sub(
+            r"\[([^\]]+)\]\(map:#?([ceputvk]?\d+)\)",
+            lambda m: f'<button type="button" class="object-link object-link-map" data-map-id="{clean_object_id(m.group(2))}" title="Показать расположение #{clean_object_id(m.group(2))} на карте">{m.group(1)}</button>',
+            s_escaped,
+            flags=re.IGNORECASE,
+        )
         s_escaped = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", s_escaped)
-        s_escaped = re.sub(r"`(.*?)`", r"<code>\1</code>", s_escaped)
-        return s_escaped
+        s_escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", s_escaped)
+        s_escaped = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", s_escaped)
+
+        # Контекстный роутинг ID: по умолчанию -> таблица, если рядом контекст местоположения/карты -> карта
+        def _make_ctx_btn(raw_id: str, full_str: str, start_idx: int, end_idx: int) -> str:
+            clean = clean_object_id(raw_id)
+            window = full_str[max(0, start_idx - 70): min(len(full_str), end_idx + 70)]
+            if _MAP_CONTEXT_RE.search(window):
+                return f'<button type="button" class="object-link object-link-map" data-map-id="{clean}" title="Показать расположение #{clean} на карте">#{clean}</button>'
+            return f'<button type="button" class="object-link" data-table-id="{clean}" title="Открыть объект #{clean} в таблице (из таблицы — на карту)">#{clean}</button>'
+
+        s_escaped = re.sub(
+            r"<code>#?([ceputvk]\d+|\d{2,})</code>",
+            lambda m: _make_ctx_btn(m.group(1), s_escaped, m.start(), m.end()),
+            s_escaped,
+            flags=re.IGNORECASE,
+        )
+        # Также преобразуем голые #ID вне HTML-тегов и атрибутов
+        parts = re.split(r"(<[^>]+>)", s_escaped)
+        for idx_p in range(0, len(parts), 2):
+            seg = parts[idx_p]
+            if "#" in seg:
+                parts[idx_p] = re.sub(
+                    r"(?<![A-Za-z0-9_])#([ceputvk]\d+|\d{2,})\b",
+                    lambda m, _seg=seg: _make_ctx_btn(m.group(1), _seg, m.start(), m.end()),
+                    seg,
+                    flags=re.IGNORECASE,
+                )
+        return "".join(parts)
 
     for line in lines:
         s = line.strip()
@@ -250,14 +296,14 @@ def _markdown_to_clean_html(md: str) -> str:
             continue
         if s.startswith("# "):
             close_lists()
-            out.append(f"<h1 class='ai-h1'>{html.escape(s[2:].strip())}</h1>")
+            out.append(f"<h1 class='ai-h1'>{format_inline(s[2:].strip())}</h1>")
         elif s.startswith("## "):
             close_lists()
-            out.append(f"<h2 class='ai-h2'>{html.escape(s[3:].strip())}</h2>")
+            out.append(f"<h2 class='ai-h2'>{format_inline(s[3:].strip())}</h2>")
         elif s.startswith("### "):
             close_lists()
-            out.append(f"<h3 class='ai-h3'>{html.escape(s[4:].strip())}</h3>")
-        elif s.startswith("- ") or s.startswith("* "):
+            out.append(f"<h3 class='ai-h3'>{format_inline(s[4:].strip())}</h3>")
+        elif s.startswith("- ") or s.startswith("* ") or s.startswith("• "):
             if not in_ul:
                 close_lists()
                 out.append("<ul>")
@@ -275,15 +321,7 @@ def _markdown_to_clean_html(md: str) -> str:
             out.append(f"<p>{format_inline(s)}</p>")
 
     close_lists()
-    raw_html = "\n".join(out)
-
-    def repl_id(m):
-        raw = m.group(1)
-        clean = clean_object_id(raw)
-        return f'<button type="button" class="object-link" data-map-id="{raw}" title="Найти в таблице и подсветить на карте">{clean}</button>'
-
-    raw_html = re.sub(r"<code>([ceputvk]?\d+)</code>", repl_id, raw_html, flags=re.IGNORECASE)
-    return raw_html
+    return "\n".join(out)
 
 
 def render_standalone_html_report(
@@ -348,9 +386,18 @@ def render_standalone_html_report(
                     p_cat = "negative"
                 else:
                     p_cat = "normal"
+            _ai_nodes_map = (facts.get("ai_table_advices") or {}).get("nodes") or {}
+            _cid_n = clean_object_id(r.get("node_id"))
+            _graph_adv_n = r.get("diagnostic_advice") or (
+                f"Критический вакуум Pмин={p_min_v} м (проверить отметку Z={r.get('elevation_m', '—')} м и секущие задвижки)"
+                if p_cat == "data_error" else
+                (f"Дефицит напора ΔP={dp_v} м для {r.get('floors', 1)}-эт. застройки" if p_cat == "deficit" else
+                 (f"Избыточный напор Pмакс={p_max_v} м (>60 м, требуется PRV)" if p_cat == "excess" else "Норма"))
+            )
+            _llm_adv_n = r.get("ai_advice") or _ai_nodes_map.get(_cid_n) or _ai_nodes_map.get(str(r.get("node_id") or ""))
             dedup_nodes.append({
                 "node_id": r.get("node_id"),
-                "clean_id": clean_object_id(r.get("node_id")),
+                "clean_id": _cid_n,
                 "name": clean_object_name(r.get("name")),
                 "elevation_m": r.get("elevation_m", "—"),
                 "floors": r.get("floors", 0),
@@ -360,12 +407,11 @@ def render_standalone_html_report(
                 "margin_m": dp_v if dp_v is not None else "—",
                 "demand_m3_h": r.get("demand_mean_m3_h", "—"),
                 "pressure_category": p_cat,
-                "advice": r.get("diagnostic_advice") or (
-                    f"Критический вакуум Pмин={p_min_v} м (проверить отметку Z={r.get('elevation_m', '—')} м и секущие задвижки)"
-                    if p_cat == "data_error" else
-                    (f"Дефицит напора ΔP={dp_v} м для {r.get('floors', 1)}-эт. застройки" if p_cat == "deficit" else
-                     (f"Избыточный напор Pмакс={p_max_v} м (>60 м, требуется PRV)" if p_cat == "excess" else "Норма"))
-                ),
+                "graph_fact": _graph_adv_n,
+                "ai_advice": _llm_adv_n if _llm_adv_n else "",
+                "advice": _llm_adv_n if _llm_adv_n else _graph_adv_n,
+                "advice_mode": "ai" if _llm_adv_n else "graph",
+                "ai_generated": bool(_llm_adv_n),
             })
 
     raw_pipes_for_table = ppa.get("table_pipes_records") or (
@@ -373,6 +419,7 @@ def render_standalone_html_report(
         + ppa.get("top_low_hazen_williams_c_pipes", [])
         + ppa.get("closed_pipes_sample", [])
     )
+    _ai_pipes_map = (facts.get("ai_table_advices") or {}).get("pipes") or {}
     seen_pipe_ids: set[str] = set()
     dedup_pipes = []
     for p in raw_pipes_for_table:
@@ -402,9 +449,16 @@ def render_standalone_html_report(
                     v_bin = "Не определен"
             sn_clean = clean_object_id(p.get("start_node")) or "—"
             en_clean = clean_object_id(p.get("end_node")) or "—"
+            _cid_p = clean_object_id(p.get("pipe_id"))
+            _graph_adv_p = p.get("diagnostic_advice") or (
+                f"Участок перекрыт (Q=0) между узлами #{sn_clean} и #{en_clean}" if is_cl else
+                (f"Высокие потери i={i_val} м/км (узел #{sn_clean} → #{en_clean}, C={c_val})" if isinstance(i_val, (int, float)) and i_val >= 15 else
+                 f"Режим: {v_bin} (#{sn_clean} → #{en_clean})")
+            )
+            _llm_adv_p = p.get("ai_advice") or _ai_pipes_map.get(_cid_p) or _ai_pipes_map.get(pid)
             dedup_pipes.append({
                 "pipe_id": p.get("pipe_id"),
-                "clean_id": clean_object_id(p.get("pipe_id")),
+                "clean_id": _cid_p,
                 "name": clean_object_name(p.get("name")),
                 "start_node": sn_clean,
                 "end_node": en_clean,
@@ -416,13 +470,15 @@ def render_standalone_html_report(
                 "flow_m3_h": p.get("flow_max_m3_h", "—"),
                 "velocity_bin": v_bin,
                 "is_closed": is_cl,
-                "advice": p.get("diagnostic_advice") or (
-                    f"Участок перекрыт (Q=0) между узлами #{sn_clean} и #{en_clean}" if is_cl else
-                    (f"Высокие потери i={i_val} м/км (узел #{sn_clean} → #{en_clean}, C={c_val})" if isinstance(i_val, (int, float)) and i_val >= 15 else
-                     f"Режим: {v_bin} (#{sn_clean} → #{en_clean})")
-                ),
+                "graph_fact": _graph_adv_p,
+                "ai_advice": _llm_adv_p if _llm_adv_p else "",
+                "advice": _llm_adv_p if _llm_adv_p else _graph_adv_p,
+                "advice_mode": "ai" if _llm_adv_p else "graph",
+                "ai_generated": bool(_llm_adv_p),
             })
 
+    _ai_pumps_map = (facts.get("ai_table_advices") or {}).get("pumps") or {}
+    _ai_valves_map = (facts.get("ai_table_advices") or {}).get("valves") or {}
     client_tables = {
         "nodes": dedup_nodes,
         "pipes": dedup_pipes,
@@ -443,7 +499,11 @@ def render_standalone_html_report(
                 "h_work": p.get("h_working_m", p.get("h_est_m")) if p.get("h_working_m", p.get("h_est_m")) is not None else 0.0,
                 "q_ratio": p.get("q_ratio"),
                 "regime": p.get("regime", "—"),
-                "advice": p.get("diagnostic_advice", "—"),
+                "graph_fact": p.get("diagnostic_advice", "—"),
+                "ai_advice": p.get("ai_advice") or _ai_pumps_map.get(clean_object_id(p.get("pump_id"))) or _ai_pumps_map.get(str(p.get("pump_id") or "")) or "",
+                "advice": p.get("ai_advice") or _ai_pumps_map.get(clean_object_id(p.get("pump_id"))) or _ai_pumps_map.get(str(p.get("pump_id") or "")) or p.get("diagnostic_advice", "—"),
+                "advice_mode": "ai" if (p.get("ai_advice") or _ai_pumps_map.get(clean_object_id(p.get("pump_id"))) or _ai_pumps_map.get(str(p.get("pump_id") or ""))) else "graph",
+                "ai_generated": bool(p.get("ai_advice") or _ai_pumps_map.get(clean_object_id(p.get("pump_id"))) or _ai_pumps_map.get(str(p.get("pump_id") or ""))),
             }
             for p in all_pumps
         ],
@@ -456,11 +516,26 @@ def render_standalone_html_report(
                 "type_code": f"{v.get('type_code')} ({v.get('type_id')})",
                 "type_desc": v.get("type_desc"),
                 "setting": v.get("setting", "—"),
+                "p_drop_label": (
+                    f"{v.get('p_before_m')} → {v.get('p_after_m')} м (ΔP={v.get('delta_p_m')} м)"
+                    if v.get("delta_p_m") is not None else "—"
+                ),
                 "flow_min": v.get("flow_min_m3_h", 0),
                 "flow_mean": v.get("flow_mean_m3_h", 0),
                 "flow_max": v.get("flow_max_m3_h", 0),
                 "flow_swing": v.get("flow_swing_m3_h", 0),
                 "status": v.get("status", "—"),
+                "graph_fact": (
+                    f"Клапан {v.get('type_code')} (уставка {v.get('setting', '—')}), режим: {v.get('status', '—')}, ΔQ={v.get('flow_swing_m3_h', 0)} м³/ч"
+                    + (f", перепад давления {v.get('p_before_m')} → {v.get('p_after_m')} м" if v.get("delta_p_m") is not None else "")
+                ),
+                "ai_advice": _ai_valves_map.get(str(v.get("clean_id") or "")) or "",
+                "advice": _ai_valves_map.get(str(v.get("clean_id") or "")) or (
+                    f"Клапан {v.get('type_code')} (уставка {v.get('setting', '—')}), режим: {v.get('status', '—')}, ΔQ={v.get('flow_swing_m3_h', 0)} м³/ч"
+                    + (f", перепад давления {v.get('p_before_m')} → {v.get('p_after_m')} м" if v.get("delta_p_m") is not None else "")
+                ),
+                "advice_mode": "ai" if _ai_valves_map.get(str(v.get("clean_id") or "")) else "graph",
+                "ai_generated": bool(_ai_valves_map.get(str(v.get("clean_id") or ""))),
             }
             for v in valves_table
         ],
@@ -713,9 +788,19 @@ def render_standalone_html_report(
   .analysis-actions {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
   .btn-analysis {{ background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; border: none; border-radius: 6px; padding: 7px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }}
   .btn-analysis:hover {{ background: #0369a1; }}
-  .analysis-box {{ display: none; margin-top: 10px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px 16px; font-size: 13px; color: #1e293b; line-height: 1.6; }}
-  .ai-chat-followup {{ display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #cbd5e1; }}
-  .ai-chat-followup input {{ flex: 1; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12.5px; }}
+  .analysis-box {{ display: none; margin-top: 10px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px 14px; font-size: 13px; color: #1e293b; line-height: 1.55; }}
+  .ai-chat-scroll {{ max-height: 360px; overflow-y: auto; padding-right: 6px; scroll-behavior: smooth; }}
+  .ai-chat-scroll::-webkit-scrollbar {{ width: 6px; }}
+  .ai-chat-scroll::-webkit-scrollbar-thumb {{ background: #cbd5e1; border-radius: 4px; }}
+  .ai-msg-user {{ margin-top: 10px; padding: 7px 11px; background: #e0f2fe; border-radius: 7px; font-weight: 600; color: #0369a1; font-size: 12.5px; }}
+  .ai-msg-ai {{ margin-top: 6px; padding: 9px 12px; background: #fff; border: 1px solid #cbd5e1; border-radius: 7px; }}
+  .ai-md h4 {{ margin: 8px 0 4px; font-size: 13.5px; color: #0c4a6e; }}
+  .ai-md p {{ margin: 4px 0; }}
+  .ai-md ul, .ai-md ol {{ margin: 4px 0 6px 18px; padding: 0; }}
+  .ai-md li {{ margin-bottom: 3px; }}
+  .ai-md code {{ background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 12px; }}
+  .ai-chat-followup {{ display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #cbd5e1; background: #f8fafc; }}
+  .ai-chat-followup input {{ flex: 1; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12.5px; background: #fff; }}
   .ai-report-card {{ margin-top: 24px; background: var(--card); border: 1px solid #cbd5e1; border-radius: var(--radius); padding: 22px 26px; }}
   .ai-content h1.ai-h1 {{ font-size: 19px; margin: 0 0 12px; color: #0c4a6e; }}
   .ai-content h2.ai-h2 {{ font-size: 15.5px; margin: 18px 0 8px; color: #0284c7; border-bottom: 1px dashed #cbd5e1; padding-bottom: 4px; }}
@@ -759,10 +844,20 @@ def render_standalone_html_report(
   table.data-table tr.row-focused td {{ background: #fef08a !important; font-weight: 700; outline: 2px solid #f59e0b; }}
   .object-link {{ background: transparent; border: none; border-bottom: 1px dashed var(--brand); color: var(--brand); font: inherit; font-weight: 700; cursor: pointer; padding: 0 2px; }}
   .object-link:hover {{ color: #0369a1; background: #e0f2fe; border-radius: 3px; }}
-  .map-jump-btn {{ background: #f0f9ff; border: 1px solid #7dd3fc; color: #0369a1; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: 600; cursor: pointer; margin-left: 6px; }}
-  .map-jump-btn:hover {{ background: #0284c7; color: #fff; }}
+  .object-link-map {{ color: #059669; border-bottom-color: #059669; }}
+  .object-link-map:hover {{ color: #065f46; background: #dcfce7; }}
+  .chart-jump-btn {{ background: #f5f3ff; border: 1px solid #ddd6fe; color: #5b21b6; border-radius: 4px; padding: 1px 6px; font-size: 10.5px; font-weight: 600; cursor: pointer; margin-left: 6px; vertical-align: middle; }}
+  .chart-jump-btn:hover {{ background: #6d28d9; color: #fff; border-color: #6d28d9; }}
   .badge-bh {{ color: #166534; font-weight: 700; }}
   .badge-net {{ color: #075985; font-weight: 700; }}
+  .tag-ai-real {{ display: inline-block; background: #dcfce7; color: #166534; border: 1px solid #86efac; border-radius: 4px; padding: 1px 5px; font-size: 10.5px; font-weight: 700; margin-right: 5px; vertical-align: middle; }}
+  .tag-graph-fact {{ display: inline-block; background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; border-radius: 4px; padding: 1px 5px; font-size: 10.5px; font-weight: 600; margin-right: 5px; vertical-align: middle; }}
+  .row-ai-btn {{ background: #eef2ff; border: 1px solid #c7d2fe; color: #3730a3; border-radius: 4px; padding: 1px 6px; font-size: 10.5px; font-weight: 600; cursor: pointer; margin-left: 5px; vertical-align: middle; transition: all 0.12s; }}
+  .row-ai-btn:hover {{ background: #4f46e5; color: #fff; border-color: #4f46e5; }}
+  .row-ai-btn:disabled {{ opacity: 0.55; cursor: wait; }}
+  .row-toggle-btn {{ background: #f8fafc; border: 1px solid #cbd5e1; color: #475569; border-radius: 4px; padding: 1px 6px; font-size: 10.5px; font-weight: 600; cursor: pointer; margin-left: 4px; vertical-align: middle; }}
+  .row-toggle-btn:hover {{ background: #e2e8f0; color: #0f172a; }}
+  .advice-cell-wrap {{ line-height: 1.45; min-width: 240px; }}
   .num-crit {{ color: var(--crit); font-weight: 700; }}
   .num-warn {{ color: var(--warn); font-weight: 700; }}
   .num-ok {{ color: var(--ok); font-weight: 700; }}
@@ -1015,16 +1110,107 @@ function clean_object_id(id) {{
   return String(id).trim().replace(/^[ceputvk](\\d+)$/i, '$1');
 }}
 
-function formatTextWithObjectButtons(str) {{
+const MAP_CTX_REGEX = /(на\\s+карт|располож|местополож|географ|район|схем[еуа]\\s+сет|рядом\\s+с|вблизи|маршрут|ветк[иаеу]|контур)/i;
+
+function makeContextObjectButton(rawId, contextWindow, defaultTarget = 'table') {{
+  const cid = clean_object_id(rawId);
+  const toMap = (defaultTarget === 'map') || (defaultTarget === 'table' && MAP_CTX_REGEX.test(contextWindow || ''));
+  if (toMap) {{
+    return `<button type="button" class="object-link object-link-map" data-map-id="${{cid}}" title="Показать расположение #${{cid}} на карте">#${{cid}}</button>`;
+  }}
+  return `<button type="button" class="object-link" data-table-id="${{cid}}" title="Открыть объект #${{cid}} в таблице (из таблицы — на карту)">#${{cid}}</button>`;
+}}
+
+function formatTextWithObjectButtons(str, defaultTarget = 'map') {{
   if (!str) return '—';
   const escaped = String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-  return escaped.replace(/#([ceputvk]?\\d{{4,}})/gi, (_, rawId) => {{
-    const cid = clean_object_id(rawId);
-    return `<button type="button" class="object-link" data-map-id="${{cid}}" title="Показать объект #${{cid}} на карте">#${{cid}}</button>`;
+  return escaped.replace(/#([ceputvk]\\d+|\\d{{2,}})/gi, (match, rawId, offset) => {{
+    const win = escaped.slice(Math.max(0, offset - 60), Math.min(escaped.length, offset + match.length + 60));
+    return makeContextObjectButton(rawId, win, defaultTarget);
   }});
+}}
+
+function renderMarkdownToHTML(mdText, defaultTarget = 'table') {{
+  if (!mdText) return '';
+  const fmtInline = (line) => {{
+    let s = String(line || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    // 1) Ссылки фильтров: [Текст](filter:tab:preset)
+    s = s.replace(/\\[([^\\]]+)\\]\\(filter:([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\\)/g,
+      (_, txt, tab, preset) => `<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('${{tab}}','${{preset}}')" title="Применить фильтр в таблице">${{txt}} ↗</button>`
+    );
+    // 2) Явные ссылки на таблицу: [Текст](table:ID)
+    s = s.replace(/\\[([^\\]]+)\\]\\(table:#?([ceputvk]?\\d+)\\)/gi,
+      (_, txt, rawId) => {{
+        const cid = clean_object_id(rawId);
+        return `<button type="button" class="object-link" data-table-id="${{cid}}" title="Открыть #${{cid}} в таблице">${{txt}}</button>`;
+      }}
+    );
+    // 3) Явные ссылки на карту: [Текст](map:ID)
+    s = s.replace(/\\[([^\\]]+)\\]\\(map:#?([ceputvk]?\\d+)\\)/gi,
+      (_, txt, rawId) => {{
+        const cid = clean_object_id(rawId);
+        return `<button type="button" class="object-link object-link-map" data-map-id="${{cid}}" title="Показать #${{cid}} на карте">${{txt}}</button>`;
+      }}
+    );
+    // 4) Жирный, курсив, инлайн-код
+    s = s.replace(/\\*\\*([^\\*\\n]+?)\\*\\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*])\\*([^\\*\\n]+?)\\*(?!\\*)/g, '$1<em>$2</em>');
+    s = s.replace(/`([^`\\n]+?)`/g, (match, codeTxt, off) => {{
+      const mId = codeTxt.trim().match(/^#?([ceputvk]\\d+|\\d{{2,}})$/i);
+      if (mId) {{
+        const win = s.slice(Math.max(0, off - 60), Math.min(s.length, off + match.length + 60));
+        return makeContextObjectButton(mId[1], win, defaultTarget);
+      }}
+      return `<code>${{codeTxt}}</code>`;
+    }});
+    // 5) Голые #ID вне HTML-тегов
+    const parts = s.split(/(<[^>]+>)/g);
+    for (let idx = 0; idx < parts.length; idx += 2) {{
+      if (parts[idx] && parts[idx].includes('#')) {{
+        const seg = parts[idx];
+        parts[idx] = seg.replace(/(^|[^A-Za-z0-9_])#([ceputvk]\\d+|\\d{{2,}})\\b/gi, (full, pfx, rawId, off) => {{
+          const win = seg.slice(Math.max(0, off - 60), Math.min(seg.length, off + full.length + 60));
+          return pfx + makeContextObjectButton(rawId, win, defaultTarget);
+        }});
+      }}
+    }}
+    return parts.join('');
+  }};
+
+  const rawLines = String(mdText).replace(/\\r\\n/g, '\\n').split('\\n');
+  const out = [];
+  let inUl = false, inOl = false;
+  const closeLists = () => {{
+    if (inUl) {{ out.push('</ul>'); inUl = false; }}
+    if (inOl) {{ out.push('</ol>'); inOl = false; }}
+  }};
+
+  for (const rawLine of rawLines) {{
+    const s = rawLine.trim();
+    if (!s) {{ closeLists(); continue; }}
+    const hm = s.match(/^(#{{1,4}})\\s+(.*)$/);
+    if (hm) {{
+      closeLists();
+      out.push(`<h4>${{fmtInline(hm[2])}}</h4>`);
+    }} else if (/^[-*•]\\s+/.test(s)) {{
+      if (!inUl) {{ closeLists(); out.push('<ul>'); inUl = true; }}
+      out.push(`<li>${{fmtInline(s.replace(/^[-*•]\\s+/, ''))}}</li>`);
+    }} else if (/^\\d+\\.\\s+/.test(s)) {{
+      if (!inOl) {{ closeLists(); out.push('<ol>'); inOl = true; }}
+      out.push(`<li>${{fmtInline(s.replace(/^\\d+\\.\\s+/, ''))}}</li>`);
+    }} else {{
+      closeLists();
+      out.push(`<p>${{fmtInline(s)}}</p>`);
+    }}
+  }}
+  closeLists();
+  return `<div class="ai-md">${{out.join('')}}</div>`;
 }}
 
 function setupHiDPICanvas(canvas) {{
@@ -1530,64 +1716,153 @@ function drawDiurnalFlows(hoverPt = null) {{
   canvas._meta = {{ pad, pw, ph, maxY, n, dem, pmp, xOf, yOf }};
 }}
 
-// Потоковый / пошаговый вывод ИИ-ответа (эффект живого общения с ИИ)
-function streamHTMLIntoBox(boxEl, htmlContent, kind) {{
+// =================== ЖИВОЙ МНОГОХОДОВЫЙ ЧАТ ИИ С ПРОКРУТКОЙ И MARKDOWN ===================
+const aiChatHistory = {{}};
+
+function ensureChatLayout(boxEl, kind) {{
   boxEl.style.display = 'block';
-  boxEl.innerHTML = `<div style="color:#0284c7;font-weight:600;font-size:12.5px;margin-bottom:6px;">ИИ-аналитик формирует инженерное заключение...</div><div class="stream-target"></div>`;
-  const target = boxEl.querySelector('.stream-target');
+  let scrollEl = boxEl.querySelector('.ai-chat-scroll');
+  if (!scrollEl) {{
+    boxEl.innerHTML = '';
+    scrollEl = document.createElement('div');
+    scrollEl.className = 'ai-chat-scroll';
+    boxEl.appendChild(scrollEl);
+  }}
+  let followup = boxEl.querySelector('.ai-chat-followup');
+  if (!followup) {{
+    followup = document.createElement('div');
+    followup.className = 'ai-chat-followup';
+    followup.innerHTML = `
+      <input type="text" placeholder="Задать уточняющий вопрос ИИ (диалог сохраняется выше)..." onkeydown="if(event.key==='Enter')askCustomAIQuestion('${{kind}}', this)">
+      <button type="button" class="btn-subtle" onclick="askCustomAIQuestion('${{kind}}', this.previousElementSibling)">Спросить ИИ</button>
+    `;
+    boxEl.appendChild(followup);
+  }}
+  return scrollEl;
+}}
+
+function appendFollowupInput(boxEl, kind) {{
+  ensureChatLayout(boxEl, kind);
+}}
+
+function streamHTMLIntoBox(boxEl, htmlContent, kind, sourceLabel = 'Автономный графовый разбор (локальный llama-server :8080 недоступен)') {{
+  aiChatHistory[kind] = [];
+  const scrollEl = ensureChatLayout(boxEl, kind);
+  scrollEl.innerHTML = `<div class="ai-box-status" style="color:#0284c7;font-weight:700;font-size:12px;margin-bottom:6px;">Формирование инженерного заключения...</div><div class="stream-target"></div>`;
+  const target = scrollEl.querySelector('.stream-target');
   const tokens = htmlContent.split(/(<[^>]+>|\\s+)/);
   let i = 0;
   let acc = '';
   const timer = setInterval(() => {{
-    const step = Math.min(tokens.length, i + 8);
+    const step = Math.min(tokens.length, i + 12);
     for (; i < step; i++) acc += tokens[i];
     target.innerHTML = acc;
     if (i >= tokens.length) {{
       clearInterval(timer);
-      const header = boxEl.querySelector('div');
-      if (header) header.innerHTML = `Инженерный вывод ИИ (актуально для текущего состояния графика):`;
-      const followup = document.createElement('div');
-      followup.className = 'ai-chat-followup';
-      followup.innerHTML = `
-        <input type="text" placeholder="Задать уточняющий вопрос ИИ по этому графику или объекту..." onkeydown="if(event.key==='Enter')askCustomAIQuestion('${{kind}}', this)">
-        <button type="button" class="btn-subtle" onclick="askCustomAIQuestion('${{kind}}', this.previousElementSibling)">Спросить ИИ</button>
-      `;
-      boxEl.appendChild(followup);
+      const header = scrollEl.querySelector('.ai-box-status');
+      if (header) header.innerHTML = sourceLabel;
     }}
   }}, 18);
 }}
 
-async function tryCallLocalLLM(systemPrompt, userPrompt) {{
-  const endpoints = [];
-  if (window.LOCAL_LLM_URL) endpoints.push(window.LOCAL_LLM_URL);
-  endpoints.push('http://127.0.0.1:8080/v1/chat/completions');
-  for (const url of endpoints) {{
+async function checkLocalLLMHealth(baseUrl) {{
+  try {{
+    const ctrl = new AbortController();
+    const id = setTimeout(() => ctrl.abort(), 1500);
+    const r = await fetch(baseUrl + '/health', {{ method: 'GET', signal: ctrl.signal }});
+    clearTimeout(id);
+    return r.ok;
+  }} catch (_e) {{
+    return false;
+  }}
+}}
+
+async function streamLocalLLMMessages(messages, onTokenChunk, maxTokens = 700) {{
+  const baseUrls = [];
+  if (window.LOCAL_LLM_BASE_URL) baseUrls.push(window.LOCAL_LLM_BASE_URL.replace(/\\/$/, ''));
+  baseUrls.push('http://127.0.0.1:8080');
+
+  const cleanLLMText = (t) => String(t || '').replace(/<think>[\\s\\S]*?<\\/think>/gi, '').replace(/<think>[\\s\\S]*$/gi, '').trim();
+
+  for (const base of baseUrls) {{
+    const alive = await checkLocalLLMHealth(base);
+    if (!alive) continue;
+
+    const t0 = performance.now();
+    const ctrl = new AbortController();
+    const hardTimeout = setTimeout(() => ctrl.abort(), 90000);
     try {{
-      const ctrl = new AbortController();
-      const id = setTimeout(() => ctrl.abort(), 2200);
-      const resp = await fetch(url, {{
+      const resp = await fetch(base + '/v1/chat/completions', {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
         body: JSON.stringify({{
           model: 'local',
-          messages: [
-            {{ role: 'system', content: systemPrompt }},
-            {{ role: 'user', content: userPrompt }}
-          ],
-          max_tokens: 600,
-          temperature: 0.3
+          messages: messages,
+          max_tokens: maxTokens,
+          temperature: 0.25,
+          stream: true,
+          chat_template_kwargs: {{ enable_thinking: false }}
         }}),
         signal: ctrl.signal
       }});
-      clearTimeout(id);
-      if (resp.ok) {{
-        const data = await resp.json();
-        const txt = data?.choices?.[0]?.message?.content;
-        if (txt) return txt;
+      if (!resp.ok || !resp.body) {{
+        clearTimeout(hardTimeout);
+        continue;
       }}
-    }} catch (_e) {{}}
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let fullText = '';
+      let buffer = '';
+      let tokenChunks = 0;
+
+      while (true) {{
+        const {{ done, value }} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {{ stream: true }});
+        const lines = buffer.split('\\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {{
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const payloadStr = trimmed.slice(5).trim();
+          if (!payloadStr || payloadStr === '[DONE]') continue;
+          try {{
+            const parsed = JSON.parse(payloadStr);
+            const delta = parsed?.choices?.[0]?.delta?.content || '';
+            if (delta) {{
+              fullText += delta;
+              tokenChunks += 1;
+              if (onTokenChunk) {{
+                const vis = cleanLLMText(fullText);
+                if (vis) onTokenChunk(vis);
+              }}
+            }}
+          }} catch (_err) {{}}
+        }}
+      }}
+      clearTimeout(hardTimeout);
+      const sec = Math.max(0.1, (performance.now() - t0) / 1000);
+      const tps = (tokenChunks / sec).toFixed(1);
+      const finalClean = cleanLLMText(fullText);
+      if (finalClean) {{
+        return {{ text: finalClean, sec: sec.toFixed(1), tps, base }};
+      }}
+    }} catch (_e) {{
+      clearTimeout(hardTimeout);
+    }}
   }}
   return null;
+}}
+
+async function streamLocalLLM(systemPrompt, userPrompt, onTokenChunk, maxTokens = 700) {{
+  return streamLocalLLMMessages(
+    [
+      {{ role: 'system', content: systemPrompt }},
+      {{ role: 'user', content: userPrompt }}
+    ],
+    onTokenChunk,
+    maxTokens
+  );
 }}
 
 function buildContextExactAnalysisHTML(kind) {{
@@ -1615,19 +1890,19 @@ function buildContextExactAnalysisHTML(kind) {{
     if (qhShowAllMode) {{
       const actCnt = curves.filter(c => c.active).length;
       const bhCnt = curves.filter(c => c.is_borehole).length;
-      return `<strong>Сводный ИИ-разбор парка насосных агрегатов (${{curves.length}} кривых Q-H):</strong><br>
+      return `<strong>Сводный разбор парка насосных агрегатов (${{curves.length}} кривых Q-H):</strong><br>
       • <b>Структура парка:</b> Скважинных агрегатов 1-го подъема — <b>${{bhCnt}} шт.</b>, сетевых/повысительных — <b>${{curves.length - bhCnt}} шт.</b> (в работе: ${{actCnt}} шт., в резерве: ${{curves.length - actCnt}} шт.).<br>
       • <b>Навигация:</b> Выберите конкретный насос в выпадающем списке выше или нажмите <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pumps', 'imbalance')">Отфильтровать проблемные насосы в таблице ↗</button> для адресного разбора его приемного коллектора и водоводов.`;
     }}
 
     if (!isAct || qWork <= 0.001) {{
-      return `<strong>ИИ-диагностика агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
+      return `<strong>Диагностика агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
       • <b>Фактическое состояние:</b> Насос находится в резерве / отключен (подача <b>Q = 0 м³/ч</b>, развиваемый напор <b>H = 0 м</b>; паспортный номинал кривой <code>${{cur.curve_id}}</code>: Qном = ${{qNom}} м³/ч, Hном = ${{hNom}} м).<br>
       • <b>Состояние приемного узла коллектора <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button>:</b> Отметка Z = ${{colZ}} м, фактическое давление в узле P = <b>${{colP}} м</b>${{nbPipes ? ` (отходящие участки: ${{nbPipes}})` : ''}}.<br>
       • <b>Мероприятие в ПК «Аквабит»:</b> Если агрегат <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> должен работать по технологическому графику, проверьте его статус в <code>Поток Насос.csv</code> и открытость отходящего участка за узлом <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button>.`;
     }}
 
-    return `<strong>ИИ-диагностика работающего агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
+    return `<strong>Диагностика работающего агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
     • <b>Рабочая точка на кривой <code>${{cur.curve_id}}</code>:</b> Подача <b>Q = ${{qWork}} м³/ч</b> (${{ratioPct}}% от Qном = ${{qNom}} м³/ч), развиваемый напор <b>H = ${{hWork}} м</b> (Hном = ${{hNom}} м).<br>
     • <b>Привязка к смежным узлам сети:</b> Входной узел ${{isBh ? '(Источник/скважина)' : ''}} <button type="button" class="object-link" data-map-id="${{snId}}">#${{snId}}</button> (H/Z = ${{srcZ}} м) → приемный напорный узел коллектора <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button> (Z = ${{colZ}} м, давление <b>Pвых = ${{colP}} м</b>)${{nbPipes ? `, смежные водоводы: ${{nbPipes}}` : ''}}.<br>
     • <b>Инженерное заключение и действия в Аквабит:</b> ${{formatTextWithObjectButtons(pumpRow.advice || cur.diagnostic_advice)}}`;
@@ -1638,7 +1913,7 @@ function buildContextExactAnalysisHTML(kind) {{
     const worst = pts[0] || {{}};
     const wProps = DATA.node_props[worst.node_id] || DATA.node_props[worst.clean_id] || {{}};
     const nbLinks = (wProps.connected_pipe_ids || []).map(id => `<button type="button" class="object-link" data-map-id="${{id}}">#${{id}}</button>`).join(', ');
-    return `<strong>ИИ-разбор распределения свободного напора (${{pressureChartMode === 'points' ? 'Режим точек дефицита' : 'Суточный коридор 24 ч'}}):</strong><br>
+    return `<strong>Разбор распределения свободного напора (${{pressureChartMode === 'points' ? 'Режим точек дефицита' : 'Суточный коридор 24 ч'}}):</strong><br>
     • <b>Диктующий узел депрессии:</b> Абонент <button type="button" class="object-link" data-map-id="${{worst.clean_id}}">#${{worst.clean_id || '—'}}</button> (${{worst.floors ?? 1}} эт., Z = ${{worst.z ?? '—'}} м) имеет минимальный свободный напор <b>Pсвоб = ${{worst.p_free ?? '—'}} м</b> при требуемом Pтреб = ${{worst.p_req ?? '—'}} м (дефицит <b>ΔP = ${{worst.dp ?? 0}} м</b>).<br>
     • <b>Смежные подводящие участки к узлу #${{worst.clean_id}}:</b> ${{nbLinks || 'уточните на карте'}}.<br>
     • <b>Переход к выборке:</b> <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'deficit')">Отфильтровать все ${{pts.length}} узлов с дефицитом в таблице ↗</button> или <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'data_error')">Показать узлы с вакуумом P &lt; -3.0 м ↗</button>.`;
@@ -1648,7 +1923,7 @@ function buildContextExactAnalysisHTML(kind) {{
     const pts = DATA.bottleneck_pipes_points || [];
     const top = pts[0] || {{}};
     const totBneck = DATA.bottleneck_pipes_total_count || pts.length;
-    return `<strong>ИИ-разбор гидравлических узких мест (всего проблемных участков: ${{totBneck}} шт.):</strong><br>
+    return `<strong>Разбор гидравлических узких мест (всего проблемных участков: ${{totBneck}} шт.):</strong><br>
     • <b>Главный дроссель сети:</b> Участок <button type="button" class="object-link" data-map-id="${{top.clean_id}}">#${{top.clean_id || '—'}}</button> между узлами <button type="button" class="object-link" data-map-id="${{top.sn}}">#${{top.sn || '—'}}</button> и <button type="button" class="object-link" data-map-id="${{top.en}}">#${{top.en || '—'}}</button> (D = ${{top.d ?? 0}} мм, L = ${{top.l ?? 0}} м, C = ${{top.c ?? '—'}}) теряет <b>${{top.i ?? 0}} м/км</b> при скорости <b>${{top.v ?? 0}} м/с</b> и расходе ${{top.q ?? 0}} м³/ч.<br>
     • <b>Причина и мероприятие в Аквабит:</b> ${{formatTextWithObjectButtons(top.advice)}}<br>
     • <b>Быстрый фильтр:</b> <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'bottlenecks')">Показать и отсортировать узкие места в таблице труб ↗</button>.`;
@@ -1659,7 +1934,7 @@ function buildContextExactAnalysisHTML(kind) {{
     const closedCnt = vBins['Перекрыты / Поток = 0 (задвижка)'] || 0;
     const stagCnt = vBins['Низкие скорости (< 0.10 м/с)'] || 0;
     const optCnt = vBins['Оптимум (0.50–1.50 м/с)'] || 0;
-    return `<strong>ИИ-разбор распределения скоростей потока по участкам сети:</strong><br>
+    return `<strong>Разбор распределения скоростей потока по участкам сети:</strong><br>
     • <b>Оптимальное ядро (0.50–1.50 м/с):</b> <b>${{optCnt}} участков</b> обеспечивают нормативный гидравлический уклон без застоя.<br>
     • <b>Перекрытые задвижками участки (Q = 0):</b> <b>${{closedCnt}} шт.</b> (<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'closed')">Отфильтровать в таблице ↗</button>) — проверить необходимость открытия для закольцовки зон депрессии.<br>
     • <b>Малопроточные зоны (&lt; 0.10 м/с):</b> <b>${{stagCnt}} шт.</b> (<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'stagnant')">Отфильтровать в таблице ↗</button>) — рекомендуется перераспределение потоков и ревизия тупиковых линий.`;
@@ -1668,14 +1943,14 @@ function buildContextExactAnalysisHTML(kind) {{
   if (kind === 'valves') {{
     const vs = DATA.tables.valves || [];
     const topV = vs[0] || {{}};
-    return `<strong>ИИ-разбор работы регулирующих клапанов (PRV/PSV/FCV):</strong><br>
+    return `<strong>Разбор работы регулирующих клапанов (PRV/PSV/FCV):</strong><br>
     • <b>Интенсивность регулирования:</b> Клапан <button type="button" class="object-link" data-map-id="${{topV.clean_id}}">#${{topV.clean_id || '—'}}</button> (${{topV.type_code || 'PRV'}}, уставка ${{topV.setting ?? '—'}}) между узлами <button type="button" class="object-link" data-map-id="${{topV.start_node}}">#${{topV.start_node || '—'}}</button> и <button type="button" class="object-link" data-map-id="${{topV.end_node}}">#${{topV.end_node || '—'}}</button> изменяет расход от ${{topV.flow_min ?? 0}} до ${{topV.flow_max ?? 0}} м³/ч (амплитуда ΔQ = ${{topV.flow_swing ?? 0}} м³/ч).`;
   }}
 
   if (kind === 'diurnal') {{
     const dem = DATA.diurnal_demand_m3_h || [], pmp = DATA.diurnal_pump_flow_m3_h || [];
     const maxDem = Math.max(...dem, 0), maxPmp = Math.max(...pmp, 0);
-    return `<strong>ИИ-разбор суточного баланса подачи насосов и водопотребления (24 ч):</strong><br>
+    return `<strong>Разбор суточного баланса подачи насосов и водопотребления (24 ч):</strong><br>
     • <b>Пиковые нагрузки:</b> Максимальное часовое потребление абонентов (синяя линия) достигает <b>${{maxDem.toFixed(1)}} м³/ч</b>, пиковая подача насосных станций (изумрудная пунктирная линия) — <b>${{maxPmp.toFixed(1)}} м³/ч</b>.<br>
     • <b>Инженерный вывод:</b> Разница между подачей насосов и потреблением сети аккумулируется в резервуарах чистой воды (РЧВ) и компенсирует часы максимального водоразбора.`;
   }}
@@ -1691,12 +1966,45 @@ async function generateLiveAnalysis(kind) {{
   if (!box) return;
 
   const baseHtml = buildContextExactAnalysisHTML(kind);
-  const llmReply = await tryCallLocalLLM(
-    'Ты главный инженер-гидравлик ПК Аквабит. Дай точный, краткий вывод по конкретному объекту без шаблонных фраз.',
-    baseHtml.replace(/<[^>]+>/g, ' ')
+  const plainCtx = baseHtml.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();
+  aiChatHistory[kind] = [];
+
+  const scrollEl = ensureChatLayout(box, kind);
+  scrollEl.innerHTML = `<div class="ai-box-status" style="color:#0284c7;font-weight:700;font-size:12px;margin-bottom:6px;">Подключение к локальной нейросети (http://127.0.0.1:8080)...</div><div class="stream-target"></div>`;
+  const target = scrollEl.querySelector('.stream-target');
+  const statusEl = scrollEl.querySelector('.ai-box-status');
+
+  const sysPrompt = 'Ты главный инженер-гидравлик ПК «Аквабит». Дай однозначный, краткий и точный инженерный вывод строго по переданным цифрам и ID. Для сравнения параметров ссылайся на таблицу как #ID или [объект #ID](table:ID), а если важно расположение на схеме — [объект #ID на карте](map:ID). Без шаблонных оговорок и лишней воды.';
+  const userPrompt = `Проанализируй текущее состояние графика:\\n${{plainCtx}}`;
+
+  const llmRes = await streamLocalLLM(
+    sysPrompt,
+    userPrompt,
+    (partial) => {{
+      statusEl.innerHTML = `🟢 Живая генерация ИИ (GPU / llama-server @ 127.0.0.1:8080)...`;
+      target.innerHTML = renderMarkdownToHTML(partial, 'table');
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }}
   );
-  const finalHtml = llmReply ? formatTextWithObjectButtons(llmReply).replace(/\\n/g, '<br>') + '<hr style="border:none;border-top:1px dashed #cbd5e1;margin:8px 0">' + baseHtml : baseHtml;
-  streamHTMLIntoBox(box, finalHtml, kind);
+
+  if (llmRes && llmRes.text) {{
+    aiChatHistory[kind] = [
+      {{ role: 'user', content: userPrompt }},
+      {{ role: 'assistant', content: llmRes.text }}
+    ];
+    statusEl.innerHTML = `🟢 Живой вывод локальной LLM (${{llmRes.base}} • ${{llmRes.sec}} сек, ~${{llmRes.tps}} ток/с):`;
+    target.innerHTML = renderMarkdownToHTML(llmRes.text, 'table')
+      + '<hr style="border:none;border-top:1px dashed #cbd5e1;margin:8px 0">'
+      + `<div style="font-size:12px;color:#475569">${{baseHtml}}</div>`;
+    scrollEl.scrollTop = 0;
+  }} else {{
+    streamHTMLIntoBox(
+      box,
+      baseHtml,
+      kind,
+      '🟡 Автономный графовый разбор по данным модели (локальный сервер LLM http://127.0.0.1:8080 не запущен):'
+    );
+  }}
 }}
 
 async function askCustomAIQuestion(kind, inputEl) {{
@@ -1705,31 +2013,53 @@ async function askCustomAIQuestion(kind, inputEl) {{
   inputEl.value = '';
   const mapIds = {{
     qh: 'qhAnalysis', pressure: 'pressureAnalysis', bottlenecks: 'bottlenecksAnalysis',
-    stagnation: 'stagnationAnalysis', valves: 'valvesAnalysis', diurnal: 'diurnalAnalysis'
+    stagnation: 'stagnationAnalysis', valves: 'valvesAnalysis', diurnal: 'diurnalAnalysis',
+    table: 'tableAIAnalysisBox'
   }};
   const box = document.getElementById(mapIds[kind]);
   if (!box) return;
 
-  const baseCtx = buildContextExactAnalysisHTML(kind).replace(/<[^>]+>/g, ' ');
+  const scrollEl = ensureChatLayout(box, kind);
+  const baseCtx = (kind === 'table')
+    ? getFilteredAndSortedRows().slice(0, 8).map(r => `#${{r.clean_id}}: ${{r.advice || r.status || JSON.stringify(r)}}`).join('; ')
+    : buildContextExactAnalysisHTML(kind).replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();
+
   const userBubble = document.createElement('div');
-  userBubble.style.cssText = 'margin-top:8px;padding:6px 10px;background:#e0f2fe;border-radius:6px;font-weight:600;color:#0369a1;';
-  userBubble.textContent = 'Вопрос: ' + q;
-  box.appendChild(userBubble);
+  userBubble.className = 'ai-msg-user';
+  userBubble.textContent = 'Вы: ' + q;
+  scrollEl.appendChild(userBubble);
 
   const ansBubble = document.createElement('div');
-  ansBubble.style.cssText = 'margin-top:6px;padding:8px 10px;background:#fff;border:1px solid #cbd5e1;border-radius:6px;';
-  ansBubble.textContent = 'Анализ...';
-  box.appendChild(ansBubble);
+  ansBubble.className = 'ai-msg-ai';
+  ansBubble.innerHTML = '<div style="font-size:11.5px;color:#0284c7;font-weight:700;">Генерация ответа локальной ИИ-моделью...</div>';
+  scrollEl.appendChild(ansBubble);
+  scrollEl.scrollTop = scrollEl.scrollHeight;
 
-  const llmText = await tryCallLocalLLM(
-    'Ты инженер-аналитик ПК Аквабит. Отвечай строго по фактам контекста, указывай ID узлов и труб через #ID.',
-    `Контекст графика: ${{baseCtx}}\\nВопрос пользователя: ${{q}}`
+  if (!Array.isArray(aiChatHistory[kind])) aiChatHistory[kind] = [];
+  const sysPrompt = 'Ты инженер-аналитик ПК «Аквабит». Продолжай инженерный диалог строго по фактам контекста. Используй аккуратное форматирование Markdown (списки, **жирный**). Для сравнения параметров указывай объекты как #ID (ведет в таблицу), а если важно местоположение на схеме — [объект #ID на карте](map:ID).';
+  const msgs = [
+    {{ role: 'system', content: sysPrompt + '\\nБазовый контекст текущего раздела: ' + baseCtx.slice(0, 2400) }},
+    ...aiChatHistory[kind].slice(-6),
+    {{ role: 'user', content: q }}
+  ];
+
+  const llmRes = await streamLocalLLMMessages(
+    msgs,
+    (partial) => {{
+      ansBubble.innerHTML = `<div style="font-size:11px;color:#059669;font-weight:700;margin-bottom:4px">🟢 Живая генерация LLM...</div>` + renderMarkdownToHTML(partial, 'table');
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }},
+    750
   );
-  if (llmText) {{
-    ansBubble.innerHTML = formatTextWithObjectButtons(llmText).replace(/\\n/g, '<br>');
+  if (llmRes && llmRes.text) {{
+    aiChatHistory[kind].push({{ role: 'user', content: q }}, {{ role: 'assistant', content: llmRes.text }});
+    if (aiChatHistory[kind].length > 12) aiChatHistory[kind] = aiChatHistory[kind].slice(-12);
+    ansBubble.innerHTML = `<div style="font-size:11px;color:#059669;font-weight:700;margin-bottom:4px">🟢 Ответ локальной LLM (${{llmRes.sec}} сек, ~${{llmRes.tps}} ток/с):</div>` + renderMarkdownToHTML(llmRes.text, 'table');
   }} else {{
-    ansBubble.innerHTML = `<b>Ответ ИИ по контексту:</b> По вашему запросу («${{q}}») ключевые параметры определяются состоянием связанных объектов: ${{baseCtx}}`;
+    ansBubble.innerHTML = `<div style="font-size:11px;color:#b45309;font-weight:700;margin-bottom:4px">🟡 Локальный llama-server (:8080) не запущен — ответ по предрасчитанному графу:</div>По вашему запросу («${{q}}») ключевые параметры определяются состоянием связанных объектов: ${{formatTextWithObjectButtons(baseCtx, 'table')}}`;
   }}
+  scrollEl.scrollTop = scrollEl.scrollHeight;
+  inputEl.focus();
 }}
 
 // =================== УВЕДОМЛЕНИЯ И ПЕРЕХОДЫ ГРАФИК -> ТАБЛИЦА -> КАРТА ===================
@@ -2119,7 +2449,7 @@ function renderMapObjectCard(rawId) {{
   card.style.display = 'block';
 }}
 
-function focusMapObject(rawId) {{
+function focusMapObject(rawId, keepCamera = false) {{
   if (!rawId) return;
   const cid = clean_object_id(rawId);
   selectedMapObjectId = rawId;
@@ -2127,26 +2457,30 @@ function focusMapObject(rawId) {{
   let pt = nodes[rawId] || nodes['c' + cid] || nodes['e' + cid] || nodes['k' + cid] || nodes[cid];
   const link = (networkGeo.links || []).find(([lid]) => clean_object_id(lid) === cid);
 
-  // Если ищем насос или трубу, которой нет в links, найдем координаты её начального/конечного узла
+  // Если ищем насос, клапан или трубу, которой нет в links, найдем координаты её начального/конечного узла
+  let derivedPts = null;
   if (!pt && !link) {{
     const pumpRow = (DATA.tables.pumps || []).find(p => String(p.clean_id) === cid);
     const pipeRow = (DATA.tables.pipes || []).find(p => String(p.clean_id) === cid);
-    const sn = pumpRow?.start_node || pipeRow?.start_node;
-    const en = pumpRow?.end_node || pipeRow?.end_node;
+    const valveRow = (DATA.tables.valves || []).find(v => String(v.clean_id) === cid);
+    const sn = pumpRow?.start_node || pipeRow?.start_node || valveRow?.start_node;
+    const en = pumpRow?.end_node || pipeRow?.end_node || valveRow?.end_node;
     const p1 = sn ? (nodes[sn] || nodes['c' + sn] || nodes['e' + sn]) : null;
     const p2 = en ? (nodes[en] || nodes['c' + en] || nodes['e' + en]) : null;
-    if (p1 && p2) pt = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
+    if (p1 && p2) derivedPts = [p1, p2];
     else if (p1 || p2) pt = p1 || p2;
   }}
 
-  const pts = pt ? [pt] : (link ? link[1] : null);
+  const pts = link ? link[1] : (derivedPts || (pt ? [pt] : null));
   if (pts && pts.length) {{
-    const {{ w, h }} = mapSize();
-    const targetScale = Math.max(networkView.baseScale * 8, networkView.scale);
-    networkView.scale = Math.min(networkView.baseScale * 80, targetScale);
-    const centerPt = pts[Math.floor(pts.length / 2)];
-    networkView.tx = w / 2 - centerPt[0] * networkView.scale;
-    networkView.ty = h / 2 + centerPt[1] * networkView.scale;
+    if (!keepCamera) {{
+      const {{ w, h }} = mapSize();
+      const targetScale = Math.max(networkView.baseScale * 8, networkView.scale);
+      networkView.scale = Math.min(networkView.baseScale * 80, targetScale);
+      const centerPt = pts[Math.floor(pts.length / 2)];
+      networkView.tx = w / 2 - centerPt[0] * networkView.scale;
+      networkView.ty = h / 2 + centerPt[1] * networkView.scale;
+    }}
     networkView.selectedPts = pts;
     ensurePulseAnimation();
     redrawMap();
@@ -2162,7 +2496,49 @@ function closeMapCard() {{
   redrawMap();
 }}
 
-// Перетаскивание карты (Pan) и клик по объекту
+function pointToSegmentDist(px, py, x1, y1, x2, y2) {{
+  const dx = x2 - x1, dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-12) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}}
+
+function hitTestMapObject(wx, wy) {{
+  // 1) Приоритет узлам в радиусе 10 px
+  let bestNodeId = null, bestNodeD = 10 / networkView.scale;
+  for (const [nid, p] of Object.entries(networkGeo.nodes || {{}})) {{
+    if (!p) continue;
+    const d = Math.hypot(p[0] - wx, p[1] - wy);
+    if (d < bestNodeD) {{ bestNodeD = d; bestNodeId = nid; }}
+  }}
+  if (bestNodeId) return bestNodeId;
+
+  // 2) Прямой клик по трубе / участку (расстояние от точки клика до каждого отрезка полилинии <= 10 px)
+  let bestPipeId = null, bestPipeD = 10 / networkView.scale;
+  const links = networkGeo.links || [];
+  for (let li = 0; li < links.length; li++) {{
+    const lid = links[li][0];
+    const pts = links[li][1];
+    if (!pts || pts.length < 2) continue;
+    for (let k = 0; k < pts.length - 1; k++) {{
+      const p1 = pts[k], p2 = pts[k + 1];
+      // Быстрая отсечка по bounding box отрезка
+      const minX = Math.min(p1[0], p2[0]) - bestPipeD;
+      const maxX = Math.max(p1[0], p2[0]) + bestPipeD;
+      if (wx < minX || wx > maxX) continue;
+      const minY = Math.min(p1[1], p2[1]) - bestPipeD;
+      const maxY = Math.max(p1[1], p2[1]) + bestPipeD;
+      if (wy < minY || wy > maxY) continue;
+      const d = pointToSegmentDist(wx, wy, p1[0], p1[1], p2[0], p2[1]);
+      if (d < bestPipeD) {{ bestPipeD = d; bestPipeId = lid; }}
+    }}
+  }}
+  return bestPipeId;
+}}
+
+// Перетаскивание карты (Pan), подсветка курсора и клик по узлам и трубам
 networkCanvas.addEventListener('mousedown', ev => {{
   networkView.dragging = true;
   networkView.moved = false;
@@ -2170,11 +2546,19 @@ networkCanvas.addEventListener('mousedown', ev => {{
   networkView.dragStartY = ev.clientY - networkView.ty;
 }});
 window.addEventListener('mousemove', ev => {{
-  if (!networkView.dragging) return;
-  networkView.moved = true;
-  networkView.tx = ev.clientX - networkView.dragStartX;
-  networkView.ty = ev.clientY - networkView.dragStartY;
-  redrawMap();
+  if (networkView.dragging) {{
+    networkView.moved = true;
+    networkView.tx = ev.clientX - networkView.dragStartX;
+    networkView.ty = ev.clientY - networkView.dragStartY;
+    redrawMap();
+  }}
+}});
+networkCanvas.addEventListener('mousemove', ev => {{
+  if (networkView.dragging) return;
+  const rect = networkCanvas.getBoundingClientRect();
+  const wx = (ev.clientX - rect.left - networkView.tx) / networkView.scale;
+  const wy = (networkView.ty - (ev.clientY - rect.top)) / networkView.scale;
+  networkCanvas.style.cursor = hitTestMapObject(wx, wy) ? 'pointer' : 'grab';
 }});
 window.addEventListener('mouseup', () => {{ networkView.dragging = false; }});
 
@@ -2183,13 +2567,8 @@ networkCanvas.addEventListener('click', ev => {{
   const rect = networkCanvas.getBoundingClientRect();
   const wx = (ev.clientX - rect.left - networkView.tx) / networkView.scale;
   const wy = (networkView.ty - (ev.clientY - rect.top)) / networkView.scale;
-  let bestId = null, bestD = 18 / networkView.scale;
-  for (const [nid, p] of Object.entries(networkGeo.nodes || {{}})) {{
-    if (!p) continue;
-    const d = Math.hypot(p[0] - wx, p[1] - wy);
-    if (d < bestD) {{ bestD = d; bestId = nid; }}
-  }}
-  if (bestId) focusMapObject(bestId);
+  const hitId = hitTestMapObject(wx, wy);
+  if (hitId) focusMapObject(hitId, true);
 }});
 
 networkCanvas.addEventListener('wheel', ev => {{
@@ -2217,11 +2596,43 @@ document.getElementById('mapReset').onclick = () => {{
 }};
 document.getElementById('mapFind').onclick = () => focusMapObject(document.getElementById('mapSearch').value);
 
+function jumpToObjectInTable(rawId) {{
+  const cid = clean_object_id(rawId);
+  const tabOrder = ['pumps', 'pipes', 'nodes', 'valves'];
+  let foundTab = null;
+  for (const t of tabOrder) {{
+    if ((DATA.tables[t] || []).some(r => String(r.clean_id) === cid)) {{
+      foundTab = t;
+      break;
+    }}
+  }}
+  if (!foundTab) {{
+    // Если транзитного узла нет в таблицах, сразу центрируем его на карте
+    document.getElementById('mapSection').scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+    focusMapObject(rawId);
+    return;
+  }}
+  const tabLabels = {{ nodes: 'Узлы абонентов', pipes: 'Трубопроводы', pumps: 'Насосы и скважины', valves: 'Клапаны' }};
+  applyTablePresetAndHighlight(foundTab, 'all', null, 'asc', [cid], cid, `Переход к объекту #${{cid}} (${{tabLabels[foundTab]}})`);
+  const sec = document.getElementById('tablesSection');
+  if (sec) sec.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+  setTimeout(() => {{
+    const focusedTr = document.querySelector('#mainTableBody tr.row-focused');
+    if (focusedTr) focusedTr.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+  }}, 120);
+}}
+
 document.addEventListener('click', ev => {{
-  const btn = ev.target.closest('[data-map-id]');
-  if (btn) {{
+  const tblBtn = ev.target.closest('[data-table-id]');
+  if (tblBtn) {{
     ev.preventDefault();
-    const rawId = btn.dataset.mapId;
+    jumpToObjectInTable(tblBtn.dataset.tableId);
+    return;
+  }}
+  const mapBtn = ev.target.closest('[data-map-id]');
+  if (mapBtn) {{
+    ev.preventDefault();
+    const rawId = mapBtn.dataset.mapId;
     document.getElementById('mapSection').scrollIntoView({{ behavior: 'smooth', block: 'center' }});
     focusMapObject(rawId);
   }}
@@ -2281,7 +2692,7 @@ const tableSchemas = {{
     {{ key: 'free_pressure_max_m', label: 'P_своб макс, м', isCrit: r => Number(r.free_pressure_max_m) > 60 }},
     {{ key: 'margin_m', label: 'Дефицит ΔP, м', isCrit: r => Number(r.margin_m) < 0 }},
     {{ key: 'demand_m3_h', label: 'Отбор, м³/ч' }},
-    {{ key: 'advice', label: 'Инженерный вывод ИИ (причина и мероприятие)', isRichAdvice: true }}
+    {{ key: 'advice', label: 'Инженерный вывод (ИИ / Граф)', isRichAdvice: true }}
   ],
   pipes: [
     {{ key: 'clean_id', label: 'ID участка (на карту)', isId: true }},
@@ -2293,7 +2704,7 @@ const tableSchemas = {{
     {{ key: 'headloss_m_km', label: 'Потери i, м/км', isCrit: r => Number(r.headloss_m_km) >= 15 }},
     {{ key: 'hazen_williams_c', label: 'Коэфф. C' }},
     {{ key: 'flow_m3_h', label: 'Поток Q, м³/ч' }},
-    {{ key: 'advice', label: 'Инженерный вывод ИИ', isRichAdvice: true }}
+    {{ key: 'advice', label: 'Инженерный вывод (ИИ / Граф)', isRichAdvice: true }}
   ],
   pumps: [
     {{ key: 'clean_id', label: 'ID насоса (на карту)', isId: true }},
@@ -2304,7 +2715,7 @@ const tableSchemas = {{
     {{ key: 'q_nom', label: 'Q_ном, м³/ч' }},
     {{ key: 'h_work', label: 'H_раб, м' }},
     {{ key: 'regime', label: 'Режим работы' }},
-    {{ key: 'advice', label: 'Инженерный вывод ИИ (по узлам и коллектору)', isRichAdvice: true }}
+    {{ key: 'advice', label: 'Инженерный вывод (ИИ / Граф)', isRichAdvice: true }}
   ],
   valves: [
     {{ key: 'clean_id', label: 'ID клапана (на карту)', isId: true }},
@@ -2312,10 +2723,12 @@ const tableSchemas = {{
     {{ key: 'start_node', label: 'Нач. узел', isNodeRef: true }},
     {{ key: 'end_node', label: 'Кон. узел', isNodeRef: true }},
     {{ key: 'setting', label: 'Уставка' }},
+    {{ key: 'p_drop_label', label: 'P_до → P_после' }},
     {{ key: 'flow_min', label: 'Q_мин, м³/ч' }},
     {{ key: 'flow_max', label: 'Q_макс, м³/ч' }},
     {{ key: 'flow_swing', label: 'Перепад ΔQ, м³/ч' }},
-    {{ key: 'status', label: 'Статус' }}
+    {{ key: 'status', label: 'Статус' }},
+    {{ key: 'advice', label: 'Инженерный вывод (ИИ / Граф)', isRichAdvice: true }}
   ]
 }};
 
@@ -2373,7 +2786,10 @@ function applyTablePresetAndHighlight(tab, preset, sortKey, sortDir, highlightId
   const bannerTxt = document.getElementById('tableStatusText');
   if (banner && bannerTxt) {{
     banner.style.display = 'flex';
-    bannerTxt.innerHTML = `Активна выборка: <b>${{bannerTitle || preset}}</b> (подсвечено объектов: <b>${{highlightIdsSet.size || (focusId ? 1 : 'все в фильтре')}}</b>, сортировка по <code>${{sortKey || 'ID'}}</code>)`;
+    const colMeta = (tableSchemas[tab] || []).find(c => c.key === sortKey);
+    const sortRuLabel = colMeta ? colMeta.label.replace(/\\s*\\(на карту\\)/i, '') : 'ID объекта';
+    const dirRuLabel = sortKey ? (sortDir === 'desc' ? 'по убыванию' : 'по возрастанию') : 'по умолчанию';
+    bannerTxt.innerHTML = `Активна выборка: <b>${{bannerTitle || preset}}</b> (подсвечено объектов: <b>${{highlightIdsSet.size || (focusId ? 1 : 'все в фильтре')}}</b>, сортировка: <b>${{sortRuLabel}}</b>, ${{dirRuLabel}})`;
   }}
 }}
 
@@ -2439,6 +2855,88 @@ function getFilteredAndSortedRows() {{
   return rows;
 }}
 
+function hasChartForRow(tab, r) {{
+  const cid = String(r.clean_id || '');
+  if (tab === 'pumps') return (DATA.qh_curves || []).some(c => String(c.clean_id) === cid);
+  if (tab === 'pipes') return (DATA.bottleneck_pipes_points || []).some(p => String(p.clean_id) === cid) || Number(r.headloss_m_km) >= 15 || Boolean(DATA.velocity_bins);
+  if (tab === 'nodes') return (DATA.deficit_nodes_points || []).some(p => String(p.clean_id) === cid) || Number(r.margin_m) < 0 || Number(r.free_pressure_min_m) < 0;
+  if (tab === 'valves') return (DATA.valves_hourly_series || []).length > 0;
+  return false;
+}}
+
+function jumpFromTableToChart(tab, cleanId) {{
+  const cid = String(cleanId || '');
+  highlightedObjectId = cid;
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active-highlight'));
+  let targetSecId = null;
+
+  if (tab === 'pumps') {{
+    const pIdx = (DATA.qh_curves || []).findIndex(c => String(c.clean_id) === cid);
+    if (pIdx >= 0) {{
+      currentQHIndex = pIdx;
+      const sel = document.getElementById('qhSelect');
+      if (sel) sel.value = pIdx;
+      qhShowAllMode = false;
+      drawQHCurve(pIdx);
+      targetSecId = 'qhSection';
+    }}
+  }} else if (tab === 'pipes') {{
+    const isBneck = (DATA.bottleneck_pipes_points || []).some(p => String(p.clean_id) === cid);
+    if (isBneck) {{
+      drawBottlenecksChart();
+      targetSecId = 'bottlenecksSection';
+    }} else {{
+      drawStagnationChart();
+      targetSecId = 'stagnationSection';
+    }}
+  }} else if (tab === 'nodes') {{
+    switchPressureMode('points');
+    targetSecId = 'pressureSection';
+  }} else if (tab === 'valves') {{
+    drawValvesChart();
+    targetSecId = 'valvesSection';
+  }}
+
+  if (targetSecId) {{
+    const el = document.getElementById(targetSecId);
+    if (el) {{
+      el.classList.add('active-highlight');
+      el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+    }}
+  }}
+}}
+
+function buildAdviceCellInnerHTML(tab, r) {{
+  const safeId = String(r.clean_id || '').replace(/'/g, '');
+  const hasAI = Boolean(r.ai_advice && r.ai_advice.trim());
+  const mode = (r.advice_mode === 'ai' && hasAI) ? 'ai' : 'graph';
+  const shownText = mode === 'ai' ? r.ai_advice : (r.graph_fact || r.advice || '—');
+  const tagHtml = mode === 'ai'
+    ? `<span class="tag-ai-real" title="Сгенерировано локальной нейросетью (GPU)">🟢 ИИ</span>`
+    : `<span class="tag-graph-fact" title="Предрасчет по графу Python">Граф</span>`;
+  let btns = '';
+  if (mode === 'ai') {{
+    btns = `<button type="button" class="row-toggle-btn" onclick="toggleRowAdviceMode('${{tab}}','${{safeId}}')" title="Переключить обратно на графовое описание">⇄ Граф</button>`
+         + `<button type="button" class="row-ai-btn" onclick="generateRowAIAdvice('${{tab}}','${{safeId}}',this)" title="Перегенерировать вывод ИИ на GPU">↻ ИИ</button>`;
+  }} else if (hasAI) {{
+    btns = `<button type="button" class="row-toggle-btn" onclick="toggleRowAdviceMode('${{tab}}','${{safeId}}')" title="Вернуться к сгенерированному выводу ИИ">⇄ ИИ</button>`
+         + `<button type="button" class="row-ai-btn" onclick="generateRowAIAdvice('${{tab}}','${{safeId}}',this)" title="Перегенерировать вывод ИИ на GPU">↻ ИИ</button>`;
+  }} else {{
+    btns = `<button type="button" class="row-ai-btn" onclick="generateRowAIAdvice('${{tab}}','${{safeId}}',this)" title="Сформировать живой инженерный вывод нейросетью (GPU) для объекта #${{safeId}}">✨ ИИ</button>`;
+  }}
+  return `${{tagHtml}}<span class="advice-text">${{formatTextWithObjectButtons(shownText, 'map')}}</span>${{btns}}`;
+}}
+
+function toggleRowAdviceMode(tab, cleanId) {{
+  const rows = DATA.tables[tab] || [];
+  const row = rows.find(x => String(x.clean_id) === String(cleanId));
+  if (!row || !row.ai_advice) return;
+  row.advice_mode = (row.advice_mode === 'ai') ? 'graph' : 'ai';
+  row.advice = (row.advice_mode === 'ai') ? row.ai_advice : (row.graph_fact || row.advice);
+  const cellWrap = document.querySelector(`[data-ai-cell="${{tab}}:${{cleanId}}"]`);
+  if (cellWrap) cellWrap.innerHTML = buildAdviceCellInnerHTML(tab, row);
+}}
+
 function renderTable() {{
   const schema = tableSchemas[currentTable] || [];
   const rows = getFilteredAndSortedRows();
@@ -2462,7 +2960,13 @@ function renderTable() {{
     return;
   }}
 
-  rows.slice(0, 200).forEach(r => {{
+  let visibleRows = rows.slice(0, 200);
+  if (highlightRowId && !visibleRows.some(r => String(r.clean_id) === String(highlightRowId))) {{
+    const exact = rows.find(r => String(r.clean_id) === String(highlightRowId));
+    if (exact) visibleRows = [exact, ...visibleRows.slice(0, 199)];
+  }}
+
+  visibleRows.forEach(r => {{
     const tr = tbody.insertRow();
     const cidStr = String(r.clean_id);
     if (highlightRowId && cidStr === String(highlightRowId)) {{
@@ -2475,13 +2979,18 @@ function renderTable() {{
       const td = tr.insertCell();
       const v = r[col.key] ?? '—';
       if (col.isId) {{
-        td.innerHTML = `<button type="button" class="object-link" data-map-id="${{v}}" title="Центрировать и подсветить #${{v}} на карте">${{v}}</button><button type="button" class="map-jump-btn" data-map-id="${{v}}">На карту ↗</button>`;
+        const safeId = String(v || '').replace(/'/g, '');
+        const chartBtn = hasChartForRow(currentTable, r)
+          ? `<button type="button" class="chart-jump-btn" onclick="jumpFromTableToChart('${{currentTable}}','${{safeId}}')" title="Перейти к объекту #${{safeId}} на графике">📈</button>`
+          : '';
+        td.innerHTML = `<button type="button" class="object-link object-link-map" data-map-id="${{safeId}}" title="Показать и подсветить #${{safeId}} на карте">${{v}}</button>${{chartBtn}}`;
       }} else if (col.isNodeRef && v !== '—') {{
-        td.innerHTML = `<button type="button" class="object-link" data-map-id="${{v}}" title="Показать узел #${{v}} на карте">#${{v}}</button>`;
+        td.innerHTML = `<button type="button" class="object-link object-link-map" data-map-id="${{v}}" title="Показать узел #${{v}} на карте">#${{v}}</button>`;
       }} else if (col.isBadge) {{
         td.innerHTML = `<span class="${{r.is_borehole ? 'badge-bh' : 'badge-net'}}">${{v}}</span>`;
       }} else if (col.isRichAdvice) {{
-        td.innerHTML = formatTextWithObjectButtons(v);
+        const safeId = String(r.clean_id || '').replace(/'/g, '');
+        td.innerHTML = `<div class="advice-cell-wrap" data-ai-cell="${{currentTable}}:${{safeId}}">${{buildAdviceCellInnerHTML(currentTable, r)}}</div>`;
       }} else {{
         td.textContent = String(v);
       }}
@@ -2490,17 +2999,165 @@ function renderTable() {{
   }});
 }}
 
+function buildRowContextPayload(tab, r) {{
+  const payload = {{ table: tab, id: r.clean_id }};
+  if (tab === 'nodes') {{
+    payload.z_m = r.elevation_m;
+    payload.floors = r.floors;
+    payload.p_req_m = r.required_pressure_m;
+    payload.p_min_m = r.free_pressure_min_m;
+    payload.p_max_m = r.free_pressure_max_m;
+    payload.dp_margin_m = r.margin_m;
+    payload.demand_m3_h = r.demand_m3_h;
+    payload.category = r.pressure_category;
+    const np = DATA.node_props[r.clean_id] || DATA.node_props['c' + r.clean_id] || {{}};
+    if (np.connected_pipe_ids) payload.connected_pipes = np.connected_pipe_ids.slice(0, 5);
+  }} else if (tab === 'pipes') {{
+    payload.start_node = r.start_node;
+    payload.end_node = r.end_node;
+    payload.d_mm = r.diameter_mm;
+    payload.l_m = r.length_m;
+    payload.v_m_s = r.velocity_max_m_s;
+    payload.i_m_km = r.headloss_m_km;
+    payload.c_hw = r.hazen_williams_c;
+    payload.q_m3_h = r.flow_m3_h;
+    payload.velocity_bin = r.velocity_bin;
+    payload.is_closed = r.is_closed;
+    const snP = DATA.node_props[r.start_node] || DATA.node_props['c' + r.start_node];
+    const enP = DATA.node_props[r.end_node] || DATA.node_props['c' + r.end_node];
+    if (snP) payload.start_node_p_m = snP.p_min;
+    if (enP) payload.end_node_p_m = enP.p_min;
+  }} else if (tab === 'pumps') {{
+    payload.pump_type = r.pump_type;
+    payload.is_borehole = r.is_borehole;
+    payload.active = r.active;
+    payload.start_node = r.start_node;
+    payload.end_node = r.end_node;
+    payload.collector_p_m = r.collector_pressure_m;
+    payload.q_work_m3_h = r.q_work;
+    payload.q_nom_m3_h = r.q_nom;
+    payload.h_work_m = r.h_work;
+    payload.regime = r.regime;
+    const enP = DATA.node_props[r.end_node] || DATA.node_props['c' + r.end_node];
+    if (enP) {{ payload.collector_z_m = enP.z; payload.collector_pipes = (enP.connected_pipe_ids || []).slice(0, 4); }}
+  }} else if (tab === 'valves') {{
+    payload.type = r.type_code;
+    payload.start_node = r.start_node;
+    payload.end_node = r.end_node;
+    payload.setting = r.setting;
+    payload.p_drop = r.p_drop_label;
+    payload.q_min = r.flow_min;
+    payload.q_max = r.flow_max;
+    payload.status = r.status;
+  }}
+  if (r.graph_fact) payload.graph_fact = r.graph_fact;
+  return payload;
+}}
+
+async function generateRowAIAdvice(tab, cleanId, btnEl) {{
+  const rows = DATA.tables[tab] || [];
+  const row = rows.find(x => String(x.clean_id) === String(cleanId));
+  if (!row) return false;
+  const cellWrap = document.querySelector(`[data-ai-cell="${{tab}}:${{cleanId}}"]`);
+  const txtSpan = cellWrap ? cellWrap.querySelector('.advice-text') : null;
+  if (btnEl) {{ btnEl.disabled = true; btnEl.textContent = '⏳ ИИ...'; }}
+  if (txtSpan) txtSpan.innerHTML = `<span style="color:#0284c7;font-style:italic;">Нейросеть (GPU) анализирует объект #${{cleanId}}...</span>`;
+
+  const sysPrompt = 'Ты главный инженер-гидравлик ПК «Аквабит». Дай КРАТКИЙ (1-2 предложения, до 280 символов), конкретный и однозначный инженерный вывод для одной строки таблицы: физическая причина + точное действие на сети или в ПК «Аквабит». Указывай ID смежных узлов/труб как #ID. Без вступлений, без списков, без markdown-звездочек, без шаблонных оговорок про задвижки у скважины.';
+  const userPrompt = 'Данные объекта:\\n' + JSON.stringify(buildRowContextPayload(tab, row));
+
+  const res = await streamLocalLLM(
+    sysPrompt,
+    userPrompt,
+    (partial) => {{
+      if (txtSpan) txtSpan.innerHTML = formatTextWithObjectButtons(partial.replace(/\\*\\*/g, ''), 'map');
+    }},
+    220
+  );
+
+  if (res && res.text) {{
+    const cleanTxt = res.text.replace(/\\*\\*/g, '').trim();
+    row.ai_advice = cleanTxt;
+    row.advice = cleanTxt;
+    row.advice_mode = 'ai';
+    row.ai_generated = true;
+    if (cellWrap) {{
+      cellWrap.innerHTML = buildAdviceCellInnerHTML(tab, row);
+    }}
+    return true;
+  }} else {{
+    if (cellWrap) {{
+      cellWrap.innerHTML = buildAdviceCellInnerHTML(tab, row) + ` <span style="color:#b45309;font-size:11px;">(⚠️ сервер LLM 127.0.0.1:8080 не отвечает)</span>`;
+    }}
+    return false;
+  }}
+}}
+
 async function generateTableAIAnalysis() {{
   const box = document.getElementById('tableAIAnalysisBox');
   if (!box) return;
   const rows = getFilteredAndSortedRows();
-  const sample = rows.slice(0, 5);
+  const sample = rows.slice(0, 8);
   const tabNames = {{ nodes: 'Узлы абонентов', pipes: 'Трубопроводы', pumps: 'Насосные агрегаты', valves: 'Клапаны' }};
-  const topSummary = sample.map(r => `#${{r.clean_id}}: ${{r.advice || r.status || ''}}`).join('<br>• ');
-  const htmlStr = `<strong>ИИ-разбор текущей выборки таблицы «${{tabNames[currentTable]}}» (найдено строк: ${{rows.length}}):</strong><br>
-  • <b>Приоритетные объекты выборки:</b><br>• ${{formatTextWithObjectButtons(topSummary || 'Нет данных')}}<br>
-  • <b>Рекомендация:</b> Нажмите «На карту ↗» напротив любого ID в таблице, чтобы визуально локализовать проблемный узел/участок и проверить его динамику по временной шкале.`;
-  streamHTMLIntoBox(box, htmlStr, 'table');
+  const tabTitle = tabNames[currentTable] || currentTable;
+  const topSummary = sample.slice(0, 5).map(r => `#${{r.clean_id}}: ${{r.advice || r.status || ''}}`).join('<br>• ');
+  const fallbackHtml = `<strong>Разбор текущей выборки таблицы «${{tabTitle}}» (найдено строк: ${{rows.length}}, фильтр: ${{currentFilterPreset}}):</strong><br>
+  • <b>Приоритетные объекты выборки:</b><br>• ${{formatTextWithObjectButtons(topSummary || 'Нет данных', 'table')}}<br>
+  • <b>Рекомендация:</b> Нажмите на ID любого объекта в таблице, чтобы показать его на карте, или на кнопку 📈 для перехода к графику.`;
+
+  aiChatHistory['table'] = [];
+  const scrollEl = ensureChatLayout(box, 'table');
+  scrollEl.innerHTML = `<div class="ai-box-status" style="color:#0284c7;font-weight:700;font-size:12px;margin-bottom:6px;">Подключение к локальной нейросети (http://127.0.0.1:8080) для анализа ${{rows.length}} строк...</div><div class="stream-target"></div>`;
+  const target = scrollEl.querySelector('.stream-target');
+  const statusEl = scrollEl.querySelector('.ai-box-status');
+
+  const compactRows = sample.map(r => {{
+    const o = {{ id: r.clean_id }};
+    if (r.free_pressure_min_m !== undefined) o.p_min = r.free_pressure_min_m;
+    if (r.margin_m !== undefined) o.dp = r.margin_m;
+    if (r.elevation_m !== undefined) o.z = r.elevation_m;
+    if (r.diameter_mm !== undefined) o.d_mm = r.diameter_mm;
+    if (r.velocity_max_m_s !== undefined) o.v = r.velocity_max_m_s;
+    if (r.headloss_m_km !== undefined) o.i_m_km = r.headloss_m_km;
+    if (r.q_work !== undefined) o.q_work = r.q_work;
+    if (r.q_nom !== undefined) o.q_nom = r.q_nom;
+    if (r.start_node) o.start_node = r.start_node;
+    if (r.end_node) o.end_node = r.end_node;
+    if (r.advice) o.fact = r.advice;
+    return o;
+  }});
+
+  const sysPrompt = 'Ты главный инженер-гидравлик ПК «Аквабит». Проанализируй отфильтрованную выборку таблицы, выдели общую причину проблемы и дай четкий план действий в ПК «Аквабит» и на сети без шаблонных оговорок. Используй Markdown (**жирный**, списки). Для сравнения параметров указывай объекты как #ID (ведет в таблицу), а если важно расположение на схеме — [объект #ID на карте](map:ID).';
+  const userPrompt = `Таблица: ${{tabTitle}} (всего отфильтровано: ${{rows.length}}, фильтр: ${{currentFilterPreset}}).\\nТоп-${{compactRows.length}} строк выборки:\\n${{JSON.stringify(compactRows)}}`;
+
+  const llmRes = await streamLocalLLM(
+    sysPrompt,
+    userPrompt,
+    (partial) => {{
+      statusEl.innerHTML = `🟢 Живая генерация ИИ по таблице (GPU / llama-server @ 127.0.0.1:8080)...`;
+      target.innerHTML = renderMarkdownToHTML(partial, 'table');
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    }}
+  );
+
+  if (llmRes && llmRes.text) {{
+    aiChatHistory['table'] = [
+      {{ role: 'user', content: userPrompt }},
+      {{ role: 'assistant', content: llmRes.text }}
+    ];
+    statusEl.innerHTML = `🟢 Живой вывод локальной LLM по выборке таблицы (${{llmRes.base}} • ${{llmRes.sec}} сек, ~${{llmRes.tps}} ток/с):`;
+    target.innerHTML = renderMarkdownToHTML(llmRes.text, 'table')
+      + '<hr style="border:none;border-top:1px dashed #cbd5e1;margin:8px 0">'
+      + `<div style="font-size:12px;color:#475569">${{fallbackHtml}}</div>`;
+    scrollEl.scrollTop = 0;
+  }} else {{
+    streamHTMLIntoBox(
+      box,
+      fallbackHtml,
+      'table',
+      '🟡 Автономный графовый разбор выборки (локальный сервер LLM http://127.0.0.1:8080 не запущен):'
+    );
+  }}
 }}
 
 function onQHSelectChange(v) {{

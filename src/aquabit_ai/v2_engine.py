@@ -851,9 +851,70 @@ def process_aquabit_city_v3(
             f"В Труба.csv обнаружено {self_loop_pipes} участков с ошибочным совпадением Начальный узел == Конечный узел (связи восстановлены из .inp)."
         )
 
+    # 5.5 Граф гидравлической связности (BFS от источников и РЧВ по открытым участкам с учетом починенных ID начала/конца)
+    from collections import deque
+    open_adj: dict[str, list[str]] = {}
+    closed_edges: list[tuple[str, str, str]] = []
+    for p_rec in pipe_records:
+        u = clean_object_id(p_rec.get("start_node"))
+        v = clean_object_id(p_rec.get("end_node"))
+        if not u or not v or u == v:
+            continue
+        if p_rec.get("is_closed"):
+            closed_edges.append((u, v, p_rec.get("clean_id", "")))
+        else:
+            open_adj.setdefault(u, []).append(v)
+            open_adj.setdefault(v, []).append(u)
+    for _pid, (_sn, _en) in pump_endpoints.items():
+        u, v = clean_object_id(_sn), clean_object_id(_en)
+        if u and v and u != v:
+            open_adj.setdefault(u, []).append(v)
+            open_adj.setdefault(v, []).append(u)
+    if not df_valves.empty:
+        _vc_s = find_col(df_valves, "начал", default_idx=1 if len(df_valves.columns) > 1 else None)
+        _vc_e = find_col(df_valves, "конец", "конечн", default_idx=2 if len(df_valves.columns) > 2 else None)
+        if _vc_s and _vc_e:
+            for _sn, _en in zip(df_valves[_vc_s], df_valves[_vc_e]):
+                u, v = clean_object_id(str(_sn)), clean_object_id(str(_en))
+                if u and v and u != v:
+                    open_adj.setdefault(u, []).append(v)
+                    open_adj.setdefault(v, []).append(u)
+
+    seed_clean = {clean_object_id(x) for x in (source_ids_set | tank_ids_set | source_clean_ids | tank_clean_ids) if x}
+    reachable_from_sources: set[str] = set()
+    has_valid_topology = bool(seed_clean and len(open_adj) > 10)
+    if has_valid_topology:
+        q_bfs = deque(seed_clean)
+        reachable_from_sources.update(seed_clean)
+        while q_bfs:
+            cur = q_bfs.popleft()
+            for nb in open_adj.get(cur, ()):
+                if nb not in reachable_from_sources:
+                    reachable_from_sources.add(nb)
+                    q_bfs.append(nb)
+
+    # Для отсеченных узлов находим конкретную перекрытую трубу на границе с живой сетью
+    cutoff_pipe_by_node: dict[str, str] = {}
+    if has_valid_topology and closed_edges:
+        boundary_seeds: deque[tuple[str, str]] = deque()
+        for u, v, pcid in closed_edges:
+            if u in reachable_from_sources and v not in reachable_from_sources:
+                cutoff_pipe_by_node.setdefault(v, pcid)
+                boundary_seeds.append((v, pcid))
+            elif v in reachable_from_sources and u not in reachable_from_sources:
+                cutoff_pipe_by_node.setdefault(u, pcid)
+                boundary_seeds.append((u, pcid))
+        while boundary_seeds:
+            cur, pcid = boundary_seeds.popleft()
+            for nb in open_adj.get(cur, ()):
+                if nb not in reachable_from_sources and nb not in cutoff_pipe_by_node:
+                    cutoff_pipe_by_node[nb] = pcid
+                    boundary_seeds.append((nb, pcid))
+
     # 6. Узлы (включая транзитные, источники и РЧВ) + привязка к смежным трубам
     node_records = []
     all_node_props: dict[str, dict[str, Any]] = {}
+    isolated_consumer_nodes_count = 0
     pressure_bins = {
         "Ошибка / отсечение (< -3.0 м)": 0,
         "Отрицат. давление (-3.0 .. 0 м)": 0,
@@ -890,7 +951,12 @@ def process_aquabit_city_v3(
         conn_pipes = adj_pipes_by_node.get(cid) or adj_pipes_by_node.get(nid) or []
         conn_pipe_ids = [p["clean_id"] for p in conn_pipes[:4]]
 
-        # Определяем категорию давления и точный инженерный диагноз узла с привязкой к подводящим трубам
+        is_isolated_zone = bool(has_valid_topology and cid not in reachable_from_sources)
+        if is_isolated_zone and is_active_consumer:
+            isolated_consumer_nodes_count += 1
+        cutoff_pipe_id = cutoff_pipe_by_node.get(cid)
+
+        # Определяем категорию давления и точный инженерный диагноз узла с привязкой к топологии графа
         p_category = "normal"
         node_diag = "Нормативный гидравлический режим."
         if p_min is not None:
@@ -898,13 +964,18 @@ def process_aquabit_city_v3(
                 p_category = "data_error"
                 closed_nb = [p["clean_id"] for p in conn_pipes if p.get("is_closed")]
                 high_loss_nb = sorted(conn_pipes, key=lambda x: x.get("headloss_gradient_m_km") or 0, reverse=True)
-                if closed_nb:
-                    node_diag = f"Критический вакуум Pмин={p_min} м: узел отсечен закрытым участком #{closed_nb[0]} (Q=0) при активном отборе {round(q_mean, 2)} м³/ч. В Аквабит: открыть участок #{closed_nb[0]} или проверить отметку Z={elev_map.get(nid, '—')} м."
+                if is_isolated_zone and (cutoff_pipe_id or closed_nb):
+                    cut_id = cutoff_pipe_id or closed_nb[0]
+                    node_diag = f"Отсеченная зона (Pмин={p_min} м): граф подтверждает отсутствие гидравлической связи с источниками из-за перекрытого участка #{cut_id} (Q=0) при активном отборе {round(q_mean, 2)} м³/ч. В Аквабит: открыть участок #{cut_id}."
+                elif closed_nb:
+                    node_diag = f"Критический вакуум Pмин={p_min} м: рядом перекрытый участок #{closed_nb[0]} (Q=0) при активном отборе {round(q_mean, 2)} м³/ч. В Аквабит: проверить статус #{closed_nb[0]} и отметку Z={elev_map.get(nid, '—')} м."
                 elif high_loss_nb and (high_loss_nb[0].get("headloss_gradient_m_km") or 0) >= 15.0:
                     nb0 = high_loss_nb[0]
                     node_diag = f"Критический вакуум Pмин={p_min} м из-за падения напора на подводящем участке #{nb0['clean_id']} (i={nb0['headloss_gradient_m_km']} м/км, D={nb0['diameter_mm']} мм) и отметки Z={elev_map.get(nid, '—')} м."
+                elif has_valid_topology and not is_isolated_zone:
+                    node_diag = f"Ошибка исходной отметки Z={elev_map.get(nid, '—')} м (Pмин={p_min} м): узел гидравлически связан с источниками (отсечения нет, смежные трубы: {', '.join('#'+x for x in conn_pipe_ids) or 'нет'}). В Аквабит: исправить Z в Узел.csv."
                 else:
-                    node_diag = f"Критический вакуум Pмин={p_min} м при Z={elev_map.get(nid, '—')} м (смежные участки: {', '.join('#'+x for x in conn_pipe_ids) or 'нет'}). Проверить корректность геодезической отметки Z и связность ветки в ПК «Аквабит»."
+                    node_diag = f"Критический вакуум Pмин={p_min} м при Z={elev_map.get(nid, '—')} м (смежные участки: {', '.join('#'+x for x in conn_pipe_ids) or 'нет'}). Проверить отметку Z и связность ветки в ПК «Аквабит»."
             elif p_min < 0.0:
                 p_category = "negative"
                 node_diag = f"Субатмосферное давление Pмин={p_min} м при отметке Z={elev_map.get(nid, '—')} м (подводящие трубы: {', '.join('#'+x for x in conn_pipe_ids)})."
@@ -1298,15 +1369,23 @@ def process_aquabit_city_v3(
             q_max_v = round(vst["max"], 2) if vst else 0.0
             q_swing_v = round(q_max_v - q_min_v, 2)
 
+            sn_c_v = clean_object_id(sn_s) or sn_s
+            en_c_v = clean_object_id(en_s) or en_s
+            _sn_p = (all_node_props.get(sn_s) or all_node_props.get(sn_c_v) or all_node_props.get(f"c{sn_c_v}") or {}).get("p_mean")
+            _en_p = (all_node_props.get(en_s) or all_node_props.get(en_c_v) or all_node_props.get(f"c{en_c_v}") or {}).get("p_mean")
+            _dp_v = round(float(_sn_p) - float(_en_p), 2) if (isinstance(_sn_p, (int, float)) and isinstance(_en_p, (int, float))) else None
             valves_table.append({
                 "valve_id": vid_s,
                 "clean_id": clean_object_id(vid_s),
-                "start_node": clean_object_id(sn_s) or sn_s,
-                "end_node": clean_object_id(en_s) or en_s,
+                "start_node": sn_c_v,
+                "end_node": en_c_v,
                 "type_id": vtype_raw,
                 "type_code": vt_code,
                 "type_desc": vt_desc,
                 "setting": None if math.isnan(float(vset)) else round(float(vset), 2),
+                "p_before_m": _sn_p,
+                "p_after_m": _en_p,
+                "delta_p_m": _dp_v,
                 "flow_min_m3_h": q_min_v,
                 "flow_mean_m3_h": q_mean_v,
                 "flow_max_m3_h": q_max_v,
