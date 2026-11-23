@@ -2,8 +2,7 @@
 /data/
 /data_cleaned/
 /reports/
-/training_epanet_ai/
-/models/
+training/models/
 /datasets/
 /checkpoints/
 # Крупные веса и промежуточные файлы моделей

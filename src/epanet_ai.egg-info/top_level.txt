@@ -1,2 +1,0 @@
-aquabit_ai
-epanet_ai
