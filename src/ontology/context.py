@@ -1,27 +1,29 @@
-"""Формирование контекста модели и извлечение настроек дашборда."""
+"""Формирование контекста модели (с RAG-слоем СП 31.13330 в Qdrant) и извлечение настроек дашборда."""
 from __future__ import annotations
 import json
 import re
 from typing import Any
 
-def clean_object_id(raw_id: str | None) -> str:
-    if not raw_id:
-        return ""
-    s = str(raw_id).strip()
-    return re.sub(r"^[ceputvk](\d+)$", r"\1", s, flags=re.IGNORECASE)
+from processing.identifiers import clean_object_id, clean_object_name
 
-def clean_object_name(raw_name: str | None) -> str:
-    if not raw_name:
-        return ""
-    return re.sub(r"\s*\(\s*Google\s*\)\s*", "", str(raw_name), flags=re.IGNORECASE).strip()
+try:
+    from rag.retriever import retrieve_norms_for_facts
+except Exception:
+    retrieve_norms_for_facts = None  # type: ignore[assignment]
+
+try:
+    from llm.post_validator import sanitize_ai_report_text
+except Exception:
+    sanitize_ai_report_text = None  # type: ignore[assignment]
+
 
 def build_enriched_ai_context(
     facts: dict[str, Any],
     arg2: Any = None,
     arg3: Any = None,
 ) -> dict[str, Any]:
-    """Формирует обогащенный графовый контекст для LLM (с цепочками Скважина -> Насос -> Коллектор -> Труба),
-    позволяющий модели делать однозначные инженерные выводы без гадания.
+    """Формирует обогащенный графовый контекст для LLM (с цепочками Скважина -> Насос -> Коллектор -> Труба
+    и нормативными пунктами СП 31.13330 из Qdrant RAG), позволяющий модели делать однозначные инженерные выводы.
     Поддерживает вызов как (facts, triggered_rules, problem_domains), так и (facts, ranked_domains, triggered_rules)."""
     pa = facts.get("pressure_analysis", {})
     ppa = facts.get("pipes_analysis", {})
@@ -42,7 +44,7 @@ def build_enriched_ai_context(
             elif isinstance(first, dict) and ("rule_id" in first or "diagnosis" in first):
                 triggered_rules = candidate
 
-    def _clip(val: Any, limit: int = 220) -> Any:
+    def _clip(val: Any, limit: int = 240) -> Any:
         if not isinstance(val, str):
             return val
         s = re.sub(r"\s+", " ", val).strip()
@@ -51,6 +53,7 @@ def build_enriched_ai_context(
     def compact_pump(p: dict[str, Any]) -> dict[str, Any]:
         raw = {
             "id": p.get("clean_id"),
+            "name": p.get("name"),
             "type": p.get("pump_type"),
             "src_node": p.get("start_node"),
             "src_head_m": p.get("source_head_m"),
@@ -62,7 +65,7 @@ def build_enriched_ai_context(
             "q_work": p.get("q_working_m3_h"),
             "q_nom": p.get("q_nominal_m3_h"),
             "h_work": p.get("h_working_m"),
-            "diag": _clip(p.get("diagnostic_advice"), 200),
+            "diag": _clip(p.get("diagnostic_advice"), 220),
         }
         return {k: v for k, v in raw.items() if v is not None and v != ""}
 
@@ -71,7 +74,7 @@ def build_enriched_ai_context(
             "id": r.get("rule_id"),
             "sev": r.get("severity"),
             "dom": r.get("problem_domain"),
-            "diag": _clip(r.get("diagnosis"), 140),
+            "diag": _clip(r.get("diagnosis"), 150),
             "objs": _clip(r.get("matched_objects"), 180),
         }
         for r in triggered_rules[:10]
@@ -89,13 +92,37 @@ def build_enriched_ai_context(
             "peak_factor_k_hour",
             "pumps_installed_capacity_m3_h",
             "pumps_peak_actual_flow_m3_h",
+            "pumps_total_actual_m3_day",
+            "first_lift_daily_supply_m3_day",
+            "first_lift_peak_flow_m3_h",
+            "booster_daily_repumping_m3_day",
+            "booster_peak_flow_m3_h",
+            "estimated_water_losses_and_unbilled_m3_day",
+            "estimated_water_losses_pct",
             "installed_vs_demand_flow_gap_m3_h",
         )
         if k in wb_raw and wb_raw[k] is not None
     }
 
+    normative_clauses: list[dict[str, Any]] = []
+    if retrieve_norms_for_facts is not None:
+        try:
+            normative_clauses = retrieve_norms_for_facts(facts, triggered_rules, top_k=7)
+        except Exception:
+            normative_clauses = []
+
     return {
         "city": facts.get("city_name"),
+        "data_source": facts.get("data_source_type", "json_digwater"),
+        "normative_sp31_rag_clauses": [
+            {
+                "clause_id": c.get("clause_id"),
+                "title": c.get("title"),
+                "section": c.get("section"),
+                "norm_text": _clip(c.get("text"), 260),
+            }
+            for c in normative_clauses
+        ],
         "ranked_domains": [
             {
                 "domain": d.get("domain", ""),
@@ -107,45 +134,55 @@ def build_enriched_ai_context(
             if isinstance(d, dict)
         ],
         "triggered_rules": compact_rules,
-        "anomalies": [_clip(a, 180) for a in (facts.get("unique_model_anomalies") or [])[:4]],
+        "anomalies": [_clip(a, 190) for a in (facts.get("unique_model_anomalies") or [])[:4]],
         "water_balance": compact_wb,
         "pressure_kpi": pa.get("pressure_bins"),
         "worst_deficit_nodes": [
             {
                 "id": r.get("clean_id"),
+                "name": r.get("name"),
                 "z": r.get("elevation_m"),
                 "floors": r.get("floors"),
+                "req_p_m": r.get("required_pressure_m"),
                 "p_min": r.get("free_pressure_min_m"),
                 "dp": r.get("pressure_surplus_deficit_m"),
+                "dp_abs_m": r.get("pressure_deficit_abs_m"),
+                "is_vacuum": r.get("is_vacuum", False),
                 "pipes": (r.get("connected_pipe_ids") or [])[:4],
-                "diag": _clip(r.get("diagnostic_advice"), 160),
+                "diag": _clip(r.get("diagnostic_advice"), 190),
             }
             for r in pa.get("worst_deficit_nodes", [])[:4]
         ],
         "worst_data_error_nodes": [
             {
                 "id": r.get("clean_id"),
+                "name": r.get("name"),
                 "z": r.get("elevation_m"),
                 "p_min": r.get("free_pressure_min_m"),
                 "pipes": (r.get("connected_pipe_ids") or [])[:4],
-                "diag": _clip(r.get("diagnostic_advice"), 160),
+                "diag": _clip(r.get("diagnostic_advice"), 190),
             }
             for r in pa.get("worst_data_error_nodes", [])[:4]
         ],
         "bottlenecks": {
             "total_count": ppa.get("bottleneck_pipes_count", 0),
+            "closed_by_valve_count": ppa.get("closed_by_valve_pipes_count", ppa.get("closed_zero_flow_pipes_count", 0)),
+            "zero_flow_open_count": ppa.get("zero_flow_open_pipes_count", 0),
             "closed_count": ppa.get("closed_zero_flow_pipes_count", 0),
             "stagnant_count": ppa.get("low_velocity_under_01ms_count", 0),
             "top_pipes": [
                 {
                     "id": p.get("clean_id"),
+                    "name": p.get("name"),
                     "from": p.get("start_node"),
                     "to": p.get("end_node"),
                     "d_mm": p.get("diameter_mm"),
+                    "l_m": p.get("length_m"),
                     "c": p.get("hazen_williams_c"),
                     "v": p.get("velocity_max_m_s"),
-                    "i": p.get("headloss_gradient_m_km"),
-                    "diag": _clip(p.get("diagnostic_advice"), 150),
+                    "i_m_km": p.get("headloss_gradient_m_km"),
+                    "total_loss_m": p.get("total_headloss_m"),
+                    "diag": _clip(p.get("diagnostic_advice"), 190),
                 }
                 for p in ppa.get("top_high_loss_pipes", [])[:4]
             ],
@@ -153,6 +190,7 @@ def build_enriched_ai_context(
         "pumps_chains": {
             "total": pma.get("total_pumps"),
             "active": pma.get("active_pumps_count"),
+            "reserve_inactive": pma.get("reserve_inactive_pumps_count"),
             "borehole": pma.get("borehole_total_count"),
             "underloaded": len(under),
             "overloaded": len(over),
@@ -161,6 +199,7 @@ def build_enriched_ai_context(
             "overloaded_sample": [compact_pump(p) for p in over[:3]],
         },
     }
+
 
 def build_ontology_ai_system_prompt(ontology: dict[str, Any]) -> str:
     rules = ontology.get("diagnostic_rules", [])
@@ -176,22 +215,34 @@ def build_ontology_ai_system_prompt(ontology: dict[str, Any]) -> str:
     onto_block = f"\nКРАТКАЯ ОНТОЛОГИЯ (RDF Turtle):\n{rules_digest}\n" if rules_digest else ""
 
     return (
-        "Ты — главный инженер-аналитик систем водоснабжения (EPANET-AI v3.2).\n"
-        "Составь точный технический аудит модели города по цепочкам фактов (Источник -> Насос -> Коллектор -> Отходящая труба).\n\n"
-        "ПРАВИЛА ИНЖЕНЕРНОЙ ТОЧНОСТИ:\n"
-        "1. Без шаблонных оговорок и двойных отрицаний: не пиши фразы «у скважины нет задвижки» или «проблема ТОЧНО НЕ в задвижке». Сразу называй физическую причину по полям `diag`, `end_p_m`, `out_i_m_km`.\n"
-        "2. Однозначные выводы вместо «либо/либо»: указывай точный ID скважины/узла (`src_node`), ID коллектора (`end_node`, его P и Z) и ID лимитирующей трубы (`out_pipe`).\n"
-        "3. Для каждой проблемы разделяй: (а) инженерное мероприятие на сети и (б) действие в ПК «Аквабит».\n"
-        "4. Интерактивные ссылки (выбирай цель по контексту):\n"
-        "   - Если нужно сравнить параметры объекта с другими в таблице (давление, потери, Q-H, уставки) — указывай ID как `#ID` или `[узел #ID](table:ID)` (ведет прямо на строку в таблице).\n"
-        "   - Если важно именно пространственное расположение, район, ветка или соседство на схеме — пиши `[узел #ID на карте](map:ID)` (ведет сразу на карту).\n"
-        "   - Для проблемных групп обязательно вставляй фильтр-ссылки на таблицу вида `[Показать узлы с вакуумом](filter:nodes:data_error)`. Доступные фильтры: "
-        "`filter:nodes:data_error`, `filter:nodes:deficit`, `filter:nodes:excess`, "
-        "`filter:pipes:bottlenecks`, `filter:pipes:closed`, `filter:pipes:stagnant`, "
-        "`filter:pumps:underload`, `filter:pumps:overload`.\n"
+        "Ты — главный инженер-аналитик систем водоснабжения (ПК «Аквабит» / EPANET-AI v3.5).\n"
+        "Составь точный технический аудит гидравлической модели города по цепочкам фактов (Источник -> Насос -> Коллектор -> Отходящая труба) "
+        "с обязательной опорой на нормативные пункты СП 31.13330.2012 / СП 31.13330.2021 из блока `normative_sp31_rag_clauses`.\n\n"
+        "ЖЕСТКИЕ ПРАВИЛА ИНЖЕНЕРНОЙ И ФИЗИЧЕСКОЙ ТОЧНОСТИ (АНТИ-ГАЛЛЮЦИНАЦИИ):\n"
+        "1. ЕДИНИЦЫ ИЗМЕРЕНИЯ: Все напоры и давления даны строго в метрах водяного столба (`м` или `м вод. ст.`). КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО переводить их в кПа, МПа или бары.\n"
+        "2. ДЕФИЦИТ НАПОРА ≠ ВАКУУМ:\n"
+        "   - Если в узле свободный напор `p_min > 0` (например, `p_min = 4.65 м` при `req_p_m = 22.0 м`, `dp = -17.35 м`, `is_vacuum = false`), в уличной магистрали давление ПОЛОЖИТЕЛЬНОЕ. ЗАПРЕЩЕНО называть это «вакуумом» или «кавитацией»! Пиши: «дефицит свободного напора 17.35 м для верхних этажей 4-этажной застройки по СП 31.13330 п. 5.11».\n"
+        "   - Если `p_min < -3.0 м` (особенно ниже -10 м, например -62 м) — физический вакуум в воде не может превышать -10 м вод. ст. Объясняй это как математический артефакт DDA-расчета EPANET при заданном отборе из отсеченного задвижкой узла или ошибке геодезической отметки Z.\n"
+        "3. УДЕЛЬНЫЙ ГРАДИЕНТ `i_m_km` И ФАКТИЧЕСКАЯ ПОТЕРЯ `total_loss_m` (Δh):\n"
+        "   - Всегда различай удельный гидравлический уклон `i` (м/км) и фактическую потерю напора на участке `Δh = i * L / 1000` (`total_loss_m`, м).\n"
+        "   - Если у короткой трубы (`l_m < 30 м`) коэффициент Хейзена-Уильямса `c < 30` (например, `C = 2.0`), указывай, что это опечатка ввода данных или искусственная имитация прикрытой задвижки, а не физическое зарастание трубы.\n"
+        "   - Различай трубы, реально перекрытые задвижкой в модели (`closed_by_valve_count`, статус CLOSED), и открытые тупиковые/резервные участки с нулевым расходом (`zero_flow_open_count`, Q = 0).\n"
+        "4. НАСОСЫ И ТЕРМИНОЛОГИЯ:\n"
+        "   - BEP — это Best Efficiency Point (точка оптимального КПД насоса, 75–115% от Qном). Никогда не расшифровывай BEP иначе.\n"
+        "   - Отключенные насосы (`Q = 0`, `[ВЫКЛ]`) при нормальном давлении в коллекторе — это штатный холодный резерв по СП 31.13330 п. 10.3 (Таблица 23), а не авария.\n"
+        "   - При перегрузке насоса (`Q > 1.15 * Qном`, работа правее BEP из-за низкого противодавления в коллекторе) рекомендуй частотное регулирование (ЧРП) для снижения оборотов либо дросселирование напорной задвижки ПОСЛЕ узла коллектора по СП 31.13330 п. 10.7 (никогда не пиши «снизить давление на выходе насоса»).\n"
+        "5. СУТОЧНЫЙ БАЛАНС И ПОТЕРИ ВОДЫ:\n"
+        "   - Основная разница между суточной подачей в сеть и полезным водопотреблением абонентов — это потери воды в сети (физические утечки + коммерческие потери / неучтенное и несанкционированное потребление), а также учет многоступенчатой перекачки (`first_lift_daily_supply_m3_day` vs `booster_daily_repumping_m3_day`). Резервуары чистой воды (РЧВ, СП 31.13330 п. 12.1–12.5) лишь сглаживают внутрисуточную неравномерность по часам.\n"
+        "6. БЕЗ ВЫДУМАННЫХ ФАЙЛОВ И КНОПОК: Никогда не упоминай исходники `.cs` (`Node.cs`, `Pipe.cs`) или несуществующие кнопки интерфейса.\n"
+        "7. НОРМАТИВНЫЕ ССЫЛКИ (RAG СП 31.13330): В каждом разделе явно ссылайся на пункты из `normative_sp31_rag_clauses` (например, «согласно СП 31.13330.2021 п. 5.11», «по п. 10.3 Таблица 23», «п. 11.5»).\n"
+        "8. Интерактивные ссылки (выбирай цель по контексту, БЕЗ обратных кавычек вокруг ссылок):\n"
+        "   - Для перехода к строке объекта в таблице пиши `[узел #ID](table:ID)` или `#ID`.\n"
+        "   - Для показа объекта на карте пиши `[узел #ID на карте](map:ID)`.\n"
+        "   - Для фильтрации таблицы вставляй ссылки: `[Показать узлы с ошибками данных](filter:nodes:data_error)`, `[Показать узлы с дефицитом напора](filter:nodes:deficit)`, `[Показать узлы с избытком напора](filter:nodes:excess)`, `[Показать узкие места труб](filter:pipes:bottlenecks)`, `[Показать перекрытые участки](filter:pipes:closed)`, `[Показать застойные зоны](filter:pipes:stagnant)`, `[Показать недогруженные насосы](filter:pumps:underload)`, `[Показать перегруженные насосы](filter:pumps:overload)`.\n"
         f"{onto_block}"
-        "5. В конце ответа выведи JSON-блок `[SELECTED_DASHBOARDS]` с ключами `section_order` (из `['qhSection', 'pressureSection', 'bottlenecksSection', 'stagnationSection', 'valvesSection', 'diurnalSection']`) и `dashboards` (`[{\"id\": \"...\"}]`).\n"
+        "9. В конце ответа выведи JSON-блок `[SELECTED_DASHBOARDS]` с ключами `section_order` (из `['qhSection', 'pressureSection', 'bottlenecksSection', 'stagnationSection', 'valvesSection', 'diurnalSection']`) и `dashboards` (`[{\"id\": \"...\"}]`).\n"
     )
+
 
 def extract_ai_dashboards_and_content(raw_ai_text: str, default_dashboards: list[str] | None = None) -> tuple[str, dict[str, Any]]:
     text = (raw_ai_text or "").strip()
@@ -230,4 +281,6 @@ def extract_ai_dashboards_and_content(raw_ai_text: str, default_dashboards: list
 
     main_text = re.sub(r"\(Выбор ИИ под проблемные зоны\)", "", main_text)
     main_text = re.sub(r"\(\s*Google\s*\)", "", main_text)
+    if sanitize_ai_report_text is not None:
+        main_text = sanitize_ai_report_text(main_text)
     return main_text, parsed_dashboards

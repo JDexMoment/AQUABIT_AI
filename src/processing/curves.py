@@ -1,7 +1,29 @@
 """Интерполяция и подготовка характеристик насосов."""
 from __future__ import annotations
 from typing import Any
-import numpy as np
+
+
+def _linspace(start: float, stop: float, num: int) -> list[float]:
+    if num <= 1:
+        return [start]
+    step = (stop - start) / (num - 1)
+    return [start + i * step for i in range(num)]
+
+
+def _interp_linear(x: float, xs: list[float], ys: list[float]) -> float:
+    if x <= xs[0]:
+        return float(ys[0])
+    if x >= xs[-1]:
+        return float(ys[-1])
+    for i in range(len(xs) - 1):
+        x0, x1 = xs[i], xs[i + 1]
+        if x0 <= x <= x1:
+            if abs(x1 - x0) < 1e-12:
+                return float(ys[i])
+            t = (x - x0) / (x1 - x0)
+            return float(ys[i] + t * (ys[i + 1] - ys[i]))
+    return float(ys[-1])
+
 
 def evaluate_qh_curve_head(pts: list[tuple[float, float]], q_val: float) -> float | None:
     if not pts:
@@ -15,11 +37,8 @@ def evaluate_qh_curve_head(pts: list[tuple[float, float]], q_val: float) -> floa
         return round(max(0.0, h_calc), 2)
     qs = [p[0] for p in pts_sorted]
     hs = [p[1] for p in pts_sorted]
-    if q_val <= qs[0]:
-        return round(float(hs[0]), 2)
-    if q_val >= qs[-1]:
-        return round(float(hs[-1]), 2)
-    return round(float(np.interp(q_val, qs, hs)), 2)
+    return round(_interp_linear(q_val, qs, hs), 2)
+
 
 def build_qh_curve_plot_points(pts: list[tuple[float, float]], n_grid: int = 25) -> dict[str, Any]:
     if not pts:
@@ -28,9 +47,12 @@ def build_qh_curve_plot_points(pts: list[tuple[float, float]], n_grid: int = 25)
     if len(pts_sorted) == 1:
         q_nom, h_nom = pts_sorted[0]
         q_max = max(q_nom * 2.0, 1.0)
-        grid_q = np.linspace(0.0, q_max, n_grid)
+        grid_q = _linspace(0.0, q_max, n_grid)
         curve_pts = [
-            [round(float(q), 2), round(max(0.0, (4.0 / 3.0) * h_nom * (1.0 - 0.25 * ((q / max(q_nom, 1e-6)) ** 2))), 2)]
+            [
+                round(float(q), 2),
+                round(max(0.0, (4.0 / 3.0) * h_nom * (1.0 - 0.25 * ((q / max(q_nom, 1e-6)) ** 2))), 2),
+            ]
             for q in grid_q
         ]
         return {

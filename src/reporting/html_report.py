@@ -417,6 +417,7 @@ def render_standalone_html_report(
         "tables": client_tables,
         "sources_table": sources_table,
         "tanks_table": tanks_table,
+        "water_balance": wb,
         "data_export_warnings": facts.get("data_export_warnings", []),
     }
     payload_json = json.dumps(payload_dict, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
@@ -749,9 +750,10 @@ def render_standalone_html_report(
       </div>
       <div class="table-toolbar">
         <div id="tableFilters" class="table-filters"></div>
-        <div style="display:flex;gap:8px;align-items:center;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
           <input id="tableSearchInput" style="padding:6px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:12.5px;min-width:220px;" placeholder="Поиск по ID, узлу или диагнозу..." oninput="onTableSearch(this.value)">
           <button type="button" class="btn-subtle" onclick="resetTableFilters()">Сбросить фильтр</button>
+          <button type="button" class="btn-subtle" onclick="exportCorrectionsForSFT()" title="Выгрузить экспертные правки диагнозов в формате JSONL для дообучения локальной модели (SFT/DPO)">Экспорт правок (JSONL)</button>
         </div>
       </div>
       <div id="tableStatusBanner" class="table-status-banner">
@@ -792,7 +794,7 @@ let hoveredPieSliceIdx = -1;
 
 function clean_object_id(id) {{
   if (!id) return '';
-  return String(id).trim().replace(/^[ceputvk](\\d+)$/i, '$1');
+  return String(id).trim().replace(/^(?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])(\\d+)$/i, '$1');
 }}
 
 const MAP_CTX_REGEX = /(на\\s+карт|располож|местополож|географ|район|схем[еуа]\\s+сет|рядом\\s+с|вблизи|маршрут|ветк[иаеу]|контур)/i;
@@ -812,7 +814,7 @@ function formatTextWithObjectButtons(str, defaultTarget = 'map') {{
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-  return escaped.replace(/#([ceputvk]\\d+|\\d{{2,}})/gi, (match, rawId, offset) => {{
+  return escaped.replace(/#((?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\\d{{2,}})/gi, (match, rawId, offset) => {{
     const win = escaped.slice(Math.max(0, offset - 60), Math.min(escaped.length, offset + match.length + 60));
     return makeContextObjectButton(rawId, win, defaultTarget);
   }});
@@ -822,6 +824,7 @@ function renderMarkdownToHTML(mdText, defaultTarget = 'table') {{
   if (!mdText) return '';
   const fmtInline = (line) => {{
     let s = String(line || '')
+      .replace(/`(\\[[^\\]]+\\]\\((?:table|map|filter):[^)]+\\))`/g, '$1')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
@@ -830,14 +833,14 @@ function renderMarkdownToHTML(mdText, defaultTarget = 'table') {{
       (_, txt, tab, preset) => `<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('${{tab}}','${{preset}}')" title="Применить фильтр в таблице">${{txt}} ↗</button>`
     );
     // 2) Явные ссылки на таблицу: [Текст](table:ID)
-    s = s.replace(/\\[([^\\]]+)\\]\\(table:#?([ceputvk]?\\d+)\\)/gi,
+    s = s.replace(/\\[([^\\]]+)\\]\\(table:#?((?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\\d+)\\)/gi,
       (_, txt, rawId) => {{
         const cid = clean_object_id(rawId);
         return `<button type="button" class="object-link" data-table-id="${{cid}}" title="Открыть #${{cid}} в таблице">${{txt}}</button>`;
       }}
     );
     // 3) Явные ссылки на карту: [Текст](map:ID)
-    s = s.replace(/\\[([^\\]]+)\\]\\(map:#?([ceputvk]?\\d+)\\)/gi,
+    s = s.replace(/\\[([^\\]]+)\\]\\(map:#?((?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\\d+)\\)/gi,
       (_, txt, rawId) => {{
         const cid = clean_object_id(rawId);
         return `<button type="button" class="object-link object-link-map" data-map-id="${{cid}}" title="Показать #${{cid}} на карте">${{txt}}</button>`;
@@ -847,19 +850,19 @@ function renderMarkdownToHTML(mdText, defaultTarget = 'table') {{
     s = s.replace(/\\*\\*([^\\*\\n]+?)\\*\\*/g, '<strong>$1</strong>');
     s = s.replace(/(^|[^*])\\*([^\\*\\n]+?)\\*(?!\\*)/g, '$1<em>$2</em>');
     s = s.replace(/`([^`\\n]+?)`/g, (match, codeTxt, off) => {{
-      const mId = codeTxt.trim().match(/^#?([ceputvk]\\d+|\\d{{2,}})$/i);
+      const mId = codeTxt.trim().match(/^#?((?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\\d{{2,}})$/i);
       if (mId) {{
         const win = s.slice(Math.max(0, off - 60), Math.min(s.length, off + match.length + 60));
         return makeContextObjectButton(mId[1], win, defaultTarget);
       }}
       return `<code>${{codeTxt}}</code>`;
     }});
-    // 5) Голые #ID вне HTML-тегов
-    const parts = s.split(/(<[^>]+>)/g);
+    // 5) Голые #ID строго вне уже созданных <button>...</button>, <code>...</code> и HTML-тегов
+    const parts = s.split(/(<button\\b[^>]*>[\\s\\S]*?<\\/button>|<code\\b[^>]*>[\\s\\S]*?<\\/code>|<[^>]+>)/gi);
     for (let idx = 0; idx < parts.length; idx += 2) {{
       if (parts[idx] && parts[idx].includes('#')) {{
         const seg = parts[idx];
-        parts[idx] = seg.replace(/(^|[^A-Za-z0-9_])#([ceputvk]\\d+|\\d{{2,}})\\b/gi, (full, pfx, rawId, off) => {{
+        parts[idx] = seg.replace(/(^|[^A-Za-z0-9_])#((?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\\d{{2,}})\\b/gi, (full, pfx, rawId, off) => {{
           const win = seg.slice(Math.max(0, off - 60), Math.min(seg.length, off + full.length + 60));
           return pfx + makeContextObjectButton(rawId, win, defaultTarget);
         }});
@@ -1635,9 +1638,17 @@ function buildContextExactAnalysisHTML(kind) {{
   if (kind === 'diurnal') {{
     const dem = DATA.diurnal_demand_m3_h || [], pmp = DATA.diurnal_pump_flow_m3_h || [];
     const maxDem = Math.max(...dem, 0), maxPmp = Math.max(...pmp, 0);
+    const wb = DATA.water_balance || {{}};
+    const firstLiftD = wb.first_lift_daily_supply_m3_day;
+    const boosterD = wb.booster_daily_repumping_m3_day;
+    const lossesD = wb.estimated_water_losses_and_unbilled_m3_day;
+    const lossesPct = wb.estimated_water_losses_pct;
+    const stageLine = (firstLiftD !== undefined && firstLiftD > 0)
+      ? `<br>• <b>Разделение ступеней подъема и потерь:</b> Подача скважин 1-го подъема — <b>${{Number(firstLiftD).toLocaleString('ru-RU')}} м³/сут</b>, перекачка сетевыми НС — <b>${{Number(boosterD || 0).toLocaleString('ru-RU')}} м³/сут</b>, расчетные потери и неучтенный отбор — <b>${{Number(lossesD || 0).toLocaleString('ru-RU')}} м³/сут (~${{lossesPct ?? 0}}%)</b>.`
+      : '';
     return `<strong>Разбор суточного баланса подачи насосов и водопотребления (24 ч):</strong><br>
-    • <b>Пиковые нагрузки:</b> Максимальное часовое потребление абонентов (синяя линия) достигает <b>${{maxDem.toFixed(1)}} м³/ч</b>, пиковая подача насосных станций (изумрудная пунктирная линия) — <b>${{maxPmp.toFixed(1)}} м³/ч</b>.<br>
-    • <b>Инженерный вывод:</b> Разница между подачей насосов и потреблением сети аккумулируется в резервуарах чистой воды (РЧВ) и компенсирует часы максимального водоразбора.`;
+    • <b>Пиковые нагрузки:</b> Максимальное часовое потребление абонентов (синяя линия) достигает <b>${{maxDem.toFixed(1)}} м³/ч</b>, суммарная пиковая подача насосных станций (изумрудная пунктирная линия) — <b>${{maxPmp.toFixed(1)}} м³/ч</b>.${{stageLine}}<br>
+    • <b>Инженерный вывод:</b> Основная разница между подачей насосов в сеть и полезным водопотреблением (реализацией абонентам) — это <b>потери воды в сети</b> (физические утечки из-за износа и избыточного напора P &gt; 60 м по СП 31.13330 п. 5.12 + коммерческие потери / несанкционированное потребление), а также учет многоступенчатой перекачки, тогда как резервуары чистой воды (РЧВ, СП 31.13330 п. 12.1–12.5) лишь сглаживают внутрисуточную часовую неравномерность водоразбора.`;
   }}
   return '';
 }}
@@ -2594,11 +2605,14 @@ function jumpFromTableToChart(tab, cleanId) {{
 function buildAdviceCellInnerHTML(tab, r) {{
   const safeId = String(r.clean_id || '').replace(/'/g, '');
   const hasAI = Boolean(r.ai_advice && r.ai_advice.trim());
+  const isManual = Boolean(r.manual_edited);
   const mode = (r.advice_mode === 'ai' && hasAI) ? 'ai' : 'graph';
-  const shownText = mode === 'ai' ? r.ai_advice : (r.graph_fact || r.advice || '—');
-  const tagHtml = mode === 'ai'
-    ? `<span class="tag-ai-real" title="Сгенерировано локальной нейросетью (GPU)">🟢 ИИ</span>`
-    : `<span class="tag-graph-fact" title="Предрасчет по графу Python">Граф</span>`;
+  const shownText = isManual ? r.advice : (mode === 'ai' ? r.ai_advice : (r.graph_fact || r.advice || '—'));
+  const tagHtml = isManual
+    ? `<span class="tag-ai-real" style="background:#fef3c7;color:#92400e;border-color:#fcd34d" title="Скорректировано экспертом (HITL)">✏️ Эксперт</span>`
+    : (mode === 'ai'
+      ? `<span class="tag-ai-real" title="Сгенерировано локальной нейросетью (GPU)">🟢 ИИ</span>`
+      : `<span class="tag-graph-fact" title="Предрасчет по графу Python">Граф</span>`);
   let btns = '';
   if (mode === 'ai') {{
     btns = `<button type="button" class="row-toggle-btn" onclick="toggleRowAdviceMode('${{tab}}','${{safeId}}')" title="Переключить обратно на графовое описание">⇄ Граф</button>`
@@ -2609,13 +2623,91 @@ function buildAdviceCellInnerHTML(tab, r) {{
   }} else {{
     btns = `<button type="button" class="row-ai-btn" onclick="generateRowAIAdvice('${{tab}}','${{safeId}}',this)" title="Сформировать живой инженерный вывод нейросетью (GPU) для объекта #${{safeId}}">✨ ИИ</button>`;
   }}
+  btns += `<button type="button" class="row-toggle-btn" onclick="editRowAdviceManual('${{tab}}','${{safeId}}')" title="Исправить диагноз вручную для дообучения ИИ (HITL)">✏️</button>`;
   return `${{tagHtml}}<span class="advice-text">${{formatTextWithObjectButtons(shownText, 'map')}}</span>${{btns}}`;
+}}
+
+const hitlCorrectionsLog = [];
+
+function editRowAdviceManual(tab, cleanId) {{
+  const rows = DATA.tables[tab] || [];
+  const row = rows.find(x => String(x.clean_id) === String(cleanId));
+  if (!row) return;
+  const cellWrap = document.querySelector(`[data-ai-cell="${{tab}}:${{cleanId}}"]`);
+  if (!cellWrap) return;
+  const currentVal = row.advice || row.graph_fact || '';
+  cellWrap.innerHTML = `
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      <input type="text" class="hitl-edit-input" style="flex:1;min-width:220px;padding:4px 8px;border:1px solid #0284c7;border-radius:5px;font-size:12px;" value="${{String(currentVal).replace(/"/g, '&quot;')}}">
+      <button type="button" class="row-ai-btn" onclick="saveRowAdviceManual('${{tab}}','${{cleanId}}',this)">Сохранить</button>
+      <button type="button" class="row-toggle-btn" onclick="cancelRowAdviceManual('${{tab}}','${{cleanId}}')">Отмена</button>
+    </div>
+  `;
+  const inp = cellWrap.querySelector('.hitl-edit-input');
+  if (inp) inp.focus();
+}}
+
+function saveRowAdviceManual(tab, cleanId, btnEl) {{
+  const rows = DATA.tables[tab] || [];
+  const row = rows.find(x => String(x.clean_id) === String(cleanId));
+  if (!row) return;
+  const cellWrap = document.querySelector(`[data-ai-cell="${{tab}}:${{cleanId}}"]`);
+  const inp = cellWrap ? cellWrap.querySelector('.hitl-edit-input') : null;
+  if (inp && inp.value.trim()) {{
+    const oldAdvice = row.advice || row.graph_fact || '';
+    const newAdvice = inp.value.trim();
+    row.advice = newAdvice;
+    row.manual_edited = true;
+    hitlCorrectionsLog.push({{
+      instruction: 'Составь точный инженерный диагноз для объекта водопроводной сети ПК «Аквабит» с учетом норм СП 31.13330.',
+      input: JSON.stringify(buildRowContextPayload(tab, row)),
+      rejected_output: oldAdvice,
+      output: newAdvice,
+      timestamp: new Date().toISOString()
+    }});
+  }}
+  if (cellWrap) cellWrap.innerHTML = buildAdviceCellInnerHTML(tab, row);
+}}
+
+function cancelRowAdviceManual(tab, cleanId) {{
+  const rows = DATA.tables[tab] || [];
+  const row = rows.find(x => String(x.clean_id) === String(cleanId));
+  const cellWrap = document.querySelector(`[data-ai-cell="${{tab}}:${{cleanId}}"]`);
+  if (row && cellWrap) cellWrap.innerHTML = buildAdviceCellInnerHTML(tab, row);
+}}
+
+function exportCorrectionsForSFT() {{
+  const records = [...hitlCorrectionsLog];
+  if (records.length === 0) {{
+    for (const [tab, rows] of Object.entries(DATA.tables || {{}})) {{
+      for (const r of (rows || [])) {{
+        if (r.manual_edited || r.ai_generated) {{
+          records.push({{
+            instruction: 'Составь точный инженерный диагноз для объекта водопроводной сети ПК «Аквабит» с учетом норм СП 31.13330.',
+            input: JSON.stringify(buildRowContextPayload(tab, r)),
+            output: r.advice || r.graph_fact || ''
+          }});
+        }}
+      }}
+    }}
+  }}
+  const jsonl = records.map(x => JSON.stringify(x)).join('\\n');
+  const blob = new Blob([jsonl || JSON.stringify({{ info: 'Отредактируйте любую строку кнопкой ✏️ перед экспортом' }})], {{ type: 'application/jsonl;charset=utf-8' }});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `aquabit_hitl_sft_${{DATA.city_name || 'model'}}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }}
 
 function toggleRowAdviceMode(tab, cleanId) {{
   const rows = DATA.tables[tab] || [];
   const row = rows.find(x => String(x.clean_id) === String(cleanId));
   if (!row || !row.ai_advice) return;
+  row.manual_edited = false;
   row.advice_mode = (row.advice_mode === 'ai') ? 'graph' : 'ai';
   row.advice = (row.advice_mode === 'ai') ? row.ai_advice : (row.graph_fact || row.advice);
   const cellWrap = document.querySelector(`[data-ai-cell="${{tab}}:${{cleanId}}"]`);
@@ -2785,9 +2877,9 @@ async function generateTableAIAnalysis() {{
   const sample = rows.slice(0, 8);
   const tabNames = {{ nodes: 'Узлы абонентов', pipes: 'Трубопроводы', pumps: 'Насосные агрегаты', valves: 'Клапаны' }};
   const tabTitle = tabNames[currentTable] || currentTable;
-  const topSummary = sample.slice(0, 5).map(r => `#${{r.clean_id}}: ${{r.advice || r.status || ''}}`).join('<br>• ');
+  const topSummaryHtml = sample.slice(0, 5).map(r => formatTextWithObjectButtons(`#${{r.clean_id}}: ${{r.advice || r.status || ''}}`, 'table')).join('<br>• ');
   const fallbackHtml = `<strong>Разбор текущей выборки таблицы «${{tabTitle}}» (найдено строк: ${{rows.length}}, фильтр: ${{currentFilterPreset}}):</strong><br>
-  • <b>Приоритетные объекты выборки:</b><br>• ${{formatTextWithObjectButtons(topSummary || 'Нет данных', 'table')}}<br>
+  • <b>Приоритетные объекты выборки:</b><br>• ${{topSummaryHtml || 'Нет данных'}}<br>
   • <b>Рекомендация:</b> Нажмите на ID любого объекта в таблице, чтобы показать его на карте, или на кнопку 📈 для перехода к графику.`;
 
   aiChatHistory['table'] = [];

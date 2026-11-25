@@ -1,11 +1,14 @@
-"""Преобразование Markdown для автономного HTML-отчёта."""
+"""Преобразование Markdown для автономного HTML-отчёта (без вложенных кнопок и ошибок экранирования)."""
 from __future__ import annotations
 import re
 import html
 from ontology.context import clean_object_id
 
+_OBJ_ID_TOKEN_RE = r"(?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\d{2,}"
+
+
 def _markdown_to_clean_html(md: str) -> str:
-    lines = md.splitlines()
+    lines = (md or "").splitlines()
     out = []
     in_ul = False
     in_ol = False
@@ -25,24 +28,41 @@ def _markdown_to_clean_html(md: str) -> str:
             in_ol = False
 
     def format_inline(text_line: str) -> str:
-        s_escaped = html.escape(text_line)
+        # Убираем обратные кавычки вокруг интерактивных markdown-ссылок: `[узел #123](table:123)`
+        cleaned_line = re.sub(
+            r"`(\[[^\]]+\]\((?:table|map|filter):[^)]+\))`",
+            r"\1",
+            text_line,
+        )
+        s_escaped = html.escape(cleaned_line)
+
         # 1) Ссылки автофильтрации таблиц: [Текст](filter:nodes:data_error)
         s_escaped = re.sub(
             r"\[([^\]]+)\]\(filter:([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\)",
-            r'<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI(\'\2\', \'\3\')" title="Применить фильтр и сортировку в таблице">\1 ↗</button>',
+            lambda m: (
+                f'<button type="button" class="filter-action-link" '
+                f'onclick="applyQuickFilterFromAI(\'{m.group(2)}\', \'{m.group(3)}\')" '
+                f'title="Применить фильтр и сортировку в таблице">{m.group(1)} ↗</button>'
+            ),
             s_escaped,
         )
-        # 2) Явные ссылки на таблицу: [Текст](table:3466703)
+        # 2) Явные ссылки на таблицу: [Текст](table:3466703) или [Текст](table:node_3466703)
         s_escaped = re.sub(
-            r"\[([^\]]+)\]\(table:#?([ceputvk]?\d+)\)",
-            lambda m: f'<button type="button" class="object-link" data-table-id="{clean_object_id(m.group(2))}" title="Открыть объект #{clean_object_id(m.group(2))} в таблице">{m.group(1)}</button>',
+            rf"\[([^\]]+)\]\(table:#?({_OBJ_ID_TOKEN_RE})\)",
+            lambda m: (
+                f'<button type="button" class="object-link" data-table-id="{clean_object_id(m.group(2))}" '
+                f'title="Открыть объект #{clean_object_id(m.group(2))} в таблице">{m.group(1)}</button>'
+            ),
             s_escaped,
             flags=re.IGNORECASE,
         )
-        # 3) Явные ссылки на карту: [Текст](map:3466703)
+        # 3) Явные ссылки на карту: [Текст](map:3466703) или [Текст](map:node_3466703)
         s_escaped = re.sub(
-            r"\[([^\]]+)\]\(map:#?([ceputvk]?\d+)\)",
-            lambda m: f'<button type="button" class="object-link object-link-map" data-map-id="{clean_object_id(m.group(2))}" title="Показать расположение #{clean_object_id(m.group(2))} на карте">{m.group(1)}</button>',
+            rf"\[([^\]]+)\]\(map:#?({_OBJ_ID_TOKEN_RE})\)",
+            lambda m: (
+                f'<button type="button" class="object-link object-link-map" data-map-id="{clean_object_id(m.group(2))}" '
+                f'title="Показать расположение #{clean_object_id(m.group(2))} на карте">{m.group(1)}</button>'
+            ),
             s_escaped,
             flags=re.IGNORECASE,
         )
@@ -55,22 +75,28 @@ def _markdown_to_clean_html(md: str) -> str:
             clean = clean_object_id(raw_id)
             window = full_str[max(0, start_idx - 70): min(len(full_str), end_idx + 70)]
             if _MAP_CONTEXT_RE.search(window):
-                return f'<button type="button" class="object-link object-link-map" data-map-id="{clean}" title="Показать расположение #{clean} на карте">#{clean}</button>'
-            return f'<button type="button" class="object-link" data-table-id="{clean}" title="Открыть объект #{clean} в таблице (из таблицы — на карту)">#{clean}</button>'
+                return (
+                    f'<button type="button" class="object-link object-link-map" data-map-id="{clean}" '
+                    f'title="Показать расположение #{clean} на карте">#{clean}</button>'
+                )
+            return (
+                f'<button type="button" class="object-link" data-table-id="{clean}" '
+                f'title="Открыть объект #{clean} в таблице (из таблицы — на карту)">#{clean}</button>'
+            )
 
         s_escaped = re.sub(
-            r"<code>#?([ceputvk]\d+|\d{2,})</code>",
+            rf"<code>#?({_OBJ_ID_TOKEN_RE})</code>",
             lambda m: _make_ctx_btn(m.group(1), s_escaped, m.start(), m.end()),
             s_escaped,
             flags=re.IGNORECASE,
         )
-        # Также преобразуем голые #ID вне HTML-тегов и атрибутов
-        parts = re.split(r"(<[^>]+>)", s_escaped)
+        # Преобразуем голые #ID ТОЛЬКО вне уже созданных <button>...</button>, <code>...</code> и HTML-тегов
+        parts = re.split(r"(<button\b[^>]*>.*?</button>|<code\b[^>]*>.*?</code>|<[^>]+>)", s_escaped, flags=re.IGNORECASE)
         for idx_p in range(0, len(parts), 2):
             seg = parts[idx_p]
             if "#" in seg:
                 parts[idx_p] = re.sub(
-                    r"(?<![A-Za-z0-9_])#([ceputvk]\d+|\d{2,})\b",
+                    rf"(?<![A-Za-z0-9_])#({_OBJ_ID_TOKEN_RE})\b",
                     lambda m, _seg=seg: _make_ctx_btn(m.group(1), _seg, m.start(), m.end()),
                     seg,
                     flags=re.IGNORECASE,
