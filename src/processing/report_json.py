@@ -7,9 +7,12 @@ import warnings
 from pathlib import Path
 from typing import Any, Iterator
 
-# Некорректное поле вида `"id": Va1286,` встречается в реальном экспорте.
-# Ключ должен находиться на отдельной строке: не меняем текст внутри JSON-строк.
-_BARE_ID = re.compile(r'(?m)^(\s*"id"\s*:\s*)([A-Za-z][A-Za-z0-9_]*)(\s*[,}])')
+# Некорректное поле вида `"id": Va1286,` встречается в реальном экспорте
+# (как на отдельной строке, так и внутри однострочного JSON-объекта).
+_BARE_ID = re.compile(
+    r'((?:^|[{,]\s*)"id"\s*:\s*)(?!(?:true|false|null)\b)([A-Za-z][A-Za-z0-9_]*)(\s*[,}])',
+    flags=re.MULTILINE,
+)
 _ALLOWED_GROUPS = ('junc', 'pipe', 'pump', 'valv', 'reserv', 'tank')
 
 # AquaBit иногда выводит кавычки внутри name без JSON-экранирования.
@@ -217,15 +220,25 @@ def _to_float(val: Any) -> float | None:
         return None
 
 
+def _is_numeric_series_list(val: Any) -> bool:
+    if not isinstance(val, list) or not val:
+        return False
+    sample = val[:8]
+    return all(
+        (x is None) or (isinstance(x, (int, float)) and not isinstance(x, bool))
+        for x in sample
+    )
+
+
 def iter_normalized_report_objects(path: Path | str) -> Iterator[dict[str, Any]]:
     """Потоково выдаёт нормализованные объекты Report.json со структурой:
     {id, clean_id, type, name, properties, time_series}.
-    Поддерживает как плоский формат AquaBit (head/demand/flow на верхнем уровне объекта),
+    Поддерживает как плоский формат AquaBit (head/demand/flow/elev/start/finish/diam/len/rough),
     так и вложенные словари properties/time_series.
     """
     from processing.identifiers import clean_object_id, clean_object_name
 
-    ts_keys = ('head', 'free_pressure', 'pressure', 'demand', 'flow', 'velocity', 'headloss')
+    ts_keys = ('head', 'free_pressure', 'pressure', 'demand', 'flow', 'velocity', 'headloss', 'level')
     for group, raw in iter_report_objects(path):
         if not isinstance(raw, dict):
             continue
@@ -241,7 +254,7 @@ def iter_normalized_report_objects(path: Path | str) -> Iterator[dict[str, Any]]
             if k in ('id', 'ID', 'name', 'Name', 'properties', 'time_series'):
                 continue
             kl = k.lower()
-            if isinstance(v, list) and (kl in ts_keys or all(isinstance(x, (int, float)) or x is None for x in v[:5])):
+            if isinstance(v, list) and (kl in ts_keys or _is_numeric_series_list(v)):
                 ts[kl] = v
             else:
                 props.setdefault(k, v)

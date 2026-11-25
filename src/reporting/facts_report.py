@@ -79,7 +79,7 @@ def generate_reference_pure_facts_report(
             def_cnt = pa.get("real_required_pressure_deficit_count", 0)
             err_cnt = pa.get("data_error_below_minus_3m_count", 0)
             exc_cnt = pa.get("excess_over_60m_count", 0)
-            lines.append(f"\n## Приоритет {idx} - Обеспеченность этажности застройки свободным напором (СП 31.13330 п. 5.11–5.12)")
+            lines.append(f"\n## Приоритет {idx} - Обеспеченность этажности застройки свободным напором (СП 31.13330.2012 п. 5.11, п. 5.13)")
             if def_cnt > 0 and top_id:
                 nb_pipes = ", ".join(f"#{pid}" for pid in (top_d.get("connected_pipe_ids") or [])[:3]) or "распределительной сети"
                 pos_note = (
@@ -88,9 +88,9 @@ def generate_reference_pure_facts_report(
                     else f"свободный напор Pсвоб = {top_pfree:.2f} м, "
                 )
                 lines.append(
-                    f"- **Локализация дефицита свободного напора по этажности (СП 31.13330 п. 5.11):** В расчетной схеме выявлено **{def_cnt} абонентских узлов** с фактическим напором ниже требуемого для верхних этажей застройки "
+                    f"- **Локализация дефицита свободного напора по этажности (СП 31.13330.2012 п. 5.11):** В расчетной схеме выявлено **{def_cnt} абонентских узлов** с фактическим напором ниже требуемого для верхних этажей застройки "
                     f"([Отфильтровать и отсортировать все {def_cnt} узлов с дефицитом в таблице](filter:nodes:deficit)). "
-                    f"Максимальная нехватка зафиксирована в диктующем узле [узел {top_lbl}](table:{top_id}) (отметка Z = {top_d.get('elevation_m', '—')} м, {top_d.get('floors', 1)} эт., Pтреб = {top_d.get('required_pressure_m', 10):.1f} м): "
+                    f"Максимальная нехватка зафиксирована в диктующем узле [узел {top_lbl}](table:node:{top_id}) (отметка Z = {top_d.get('elevation_m', '—')} м, {top_d.get('floors', 1)} эт., Pтреб = {top_d.get('required_pressure_m', 10):.1f} м): "
                     f"{pos_note}нехватка напора для верхних этажей составляет **{top_abs:.2f} м** (ΔP = {top_val:.2f} м) на смежных участках {nb_pipes}."
                 )
             if err_cnt > 0:
@@ -100,7 +100,7 @@ def generate_reference_pure_facts_report(
                 lines.append(
                     f"- **Расчетные артефакты отрицательного давления (< -3.0 м, правило R02):** Обнаружено **{err_cnt} активных узлов** с расчетным давлением ниже -3.0 м "
                     f"([Показать и отсортировать {err_cnt} узлов с P < -3.0 м в таблице](filter:nodes:data_error)). "
-                    f"Поскольку физический вакуум в воде не может превышать -10 м вод. ст., экстремальное значение в узле [узел #{err_id}](table:{err_id}) (Pмин = {w_err.get('free_pressure_min_m', 0):.1f} м, Z = {w_err.get('elevation_m', '—')} м"
+                    f"Поскольку физический вакуум в воде не может превышать -10 м вод. ст., экстремальное значение в узле [узел #{err_id}](table:node:{err_id}) (Pмин = {w_err.get('free_pressure_min_m', 0):.1f} м, Z = {w_err.get('elevation_m', '—')} м"
                     + (f", смежные трубы: {err_pipes}" if err_pipes else "")
                     + f") является математическим артефактом DDA-расчета: {w_err.get('diagnostic_advice', 'проверить отметку Z и открытость подводящих труб')}."
                 )
@@ -108,12 +108,12 @@ def generate_reference_pure_facts_report(
                 w_exc = pa.get("top_excess_nodes", [{}])[0]
                 exc_id = clean_object_id(w_exc.get("node_id", ""))
                 lines.append(
-                    f"- **Зона избыточного напора (> 60 м по СП 31.13330.2021 п. 5.12):** Зафиксировано **{exc_cnt} узлов** с превышением предельно допустимых 60 м вод. ст. "
-                    f"([Отфильтровать {exc_cnt} узлов с P > 60 м](filter:nodes:excess)), максимум в узле [узел #{exc_id}](table:{exc_id}) (Pмакс = {w_exc.get('free_pressure_max_m', 0):.1f} м при Z = {w_exc.get('elevation_m', '—')} м)."
+                    f"- **Зона избыточного напора (> 60 м по СП 31.13330.2012 п. 5.13):** Зафиксировано **{exc_cnt} узлов** с превышением предельно допустимых 60 м вод. ст. "
+                    f"([Отфильтровать {exc_cnt} узлов с P > 60 м](filter:nodes:excess)), максимум в узле [узел #{exc_id}](table:node:{exc_id}) (Pмакс = {w_exc.get('free_pressure_max_m', 0):.1f} м при Z = {w_exc.get('elevation_m', '—')} м)."
                 )
             if top_id:
                 lines.append(
-                    f"- **Инженерные мероприятия и действия в ПК «Аквабит»:** (1) На сети: для обеспечения верхних этажей в зоне узла #{top_id} применить квартальную повысительную установку (ПНС по СП 31.13330 п. 7.3) или закольцевать подводящую линию (п. 11.5); в низинной зоне около #{exc_id if exc_cnt else top_id} установить регулятор давления «после себя» PRV (п. 11.38). "
+                    f"- **Инженерные мероприятия и действия в ПК «Аквабит»:** (1) На сети: для обеспечения верхних этажей в зоне узла #{top_id} применить квартальную повысительную установку (ПНС по СП 31.13330.2012 п. 5.11, Примечание 2) или закольцевать подводящую линию (п. 11.5); в низинной зоне около #{exc_id if exc_cnt else top_id} установить регулятор давления «после себя» PRV (п. 11.38). "
                     f"(2) В ПК «Аквабит»: верифицировать геодезическую отметку Z для узлов с расчетным артефактом P < -3.0 м (#{err_id if err_cnt else top_id}) и проверить статус секущих задвижек."
                 )
 
@@ -222,8 +222,8 @@ def generate_reference_pure_facts_report(
             )
 
     if norm_clauses:
-        lines.append("\n## Нормативная база аудита (RAG СП 31.13330.2012 / 2021 в Qdrant)")
-        for nc in norm_clauses[:5]:
+        lines.append("\n## Нормативная база (RAG-слой Qdrant по СП 31.13330)")
+        for nc in norm_clauses[:6]:
             lines.append(f"- **СП 31.13330 {nc.get('clause_id')} ({nc.get('title')}):** {nc.get('text')}")
 
     lines.append("\n[SELECTED_DASHBOARDS]")

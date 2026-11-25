@@ -149,6 +149,19 @@ def _decode_wkb_or_hex_geometry(hex_token: str) -> list[list[float]] | None:
     return None
 
 
+def _extract_column_names(raw_tokens: list[str]) -> list[str]:
+    """Извлекает имена столбцов с сохранением их позиций (без сдвига при пустых колонках)."""
+    # Убираем только хвостовые пустые табуляции
+    end = len(raw_tokens)
+    while end > 0 and not raw_tokens[end - 1].strip():
+        end -= 1
+    cols: list[str] = []
+    for idx, part in enumerate(raw_tokens[:end]):
+        name = part.split("\x1a", 1)[0].split("=", 1)[0].strip()
+        cols.append(name if name else f"_col_{idx}")
+    return cols
+
+
 def iter_digwater_objects(path: Path | str) -> Iterator[tuple[str, str, dict[str, str]]]:
     """Потоково обходит объекты всех слоёв файла .digWater, выдавая (layer, object_id, fields).
 
@@ -173,9 +186,9 @@ def iter_digwater_objects(path: Path | str) -> Iterator[tuple[str, str, dict[str
             parts = line.split("\t")
             if _is_layer_header_token(parts[0]):
                 layer = _extract_layer_name_from_token(parts[0])
-                col_tokens = [p for p in parts[1:] if p.strip()]
-                if col_tokens:
-                    columns = [part.split("\x1a", 1)[0].split("=", 1)[0].strip() for part in col_tokens]
+                has_inline_cols = any(p.strip() for p in parts[1:])
+                if has_inline_cols:
+                    columns = _extract_column_names(parts[1:])
                     awaiting_columns_line = False
                 else:
                     columns = []
@@ -183,7 +196,12 @@ def iter_digwater_objects(path: Path | str) -> Iterator[tuple[str, str, dict[str
                 continue
 
             if awaiting_columns_line and layer is not None and not parts[0].lstrip().isdigit():
-                columns = [part.split("\x1a", 1)[0].split("=", 1)[0].strip() for part in parts if part.strip()]
+                first_col = parts[0].split("\x1a", 1)[0].split("=", 1)[0].strip().lower()
+                # В двухстрочном заголовке CGLayer первый столбец (ID / Код / пустой) относится к parts[0] строки данных
+                if first_col in ("", "id", "код", "objid", "objectid", "#"):
+                    columns = _extract_column_names(parts[1:])
+                else:
+                    columns = _extract_column_names(parts)
                 awaiting_columns_line = False
                 continue
 
@@ -194,24 +212,34 @@ def iter_digwater_objects(path: Path | str) -> Iterator[tuple[str, str, dict[str
             fields = dict(zip(columns, parts[1 : 1 + len(columns)]))
             # Если после колонок идет шестнадцатеричная геометрия, сохраняем её под служебным ключом _hex_geom
             if len(parts) > 1 + len(columns):
-                tail_geom = parts[1 + len(columns)].strip()
-                if tail_geom:
-                    fields["_hex_geom"] = tail_geom
+                for tail_part in parts[1 + len(columns) :]:
+                    tail_geom = tail_part.strip()
+                    if tail_geom:
+                        fields["_hex_geom"] = tail_geom
+                        break
+            if "_hex_geom" not in fields:
+                for gk in ("Geom", "Geometry", "Shape", "WKB", "geom", "geometry", "shape"):
+                    gv = fields.get(gk, "").strip()
+                    if gv:
+                        fields["_hex_geom"] = gv
+                        break
             yield layer, obj_id, fields
 
 
 def read_object_names(path: Path | str) -> dict[str, str]:
     """Имена по точному числовому ID. Не объединяет объекты разных проектов."""
     names: dict[str, str] = {}
+    seen_layer: dict[str, str] = {}
     valid_layers = {f"Model\x08{name}" for name in ("Junction", "Pipe", "Pump", "Valve", "Reservoir", "Tank")}
     for layer, object_id, fields in iter_digwater_objects(path):
         if layer not in valid_layers:
             continue
         name = (fields.get("Name") or fields.get("Наименование") or fields.get("Имя") or "").strip()
         if name:
-            if object_id in names and names[object_id] != name:
+            if object_id in names and seen_layer.get(object_id) == layer and names[object_id] != name:
                 raise DigWaterFormatError(f"Повторяющийся ID {object_id} с разными именами: {path}")
-            names[object_id] = name
+            names.setdefault(object_id, name)
+            seen_layer.setdefault(object_id, layer)
     return names
 
 
@@ -246,6 +274,18 @@ def _get_field_ci(fields: dict[str, str], *candidates: str) -> str:
     return ""
 
 
+_LAYER_ID_PREFIXES: dict[str, tuple[str, ...]] = {
+    "Junction": ("c", "Ju"),
+    "Pipe": ("e", "Pi"),
+    "Pump": ("p", "Pu"),
+    "Valve": ("v", "Va"),
+    "Reservoir": ("e", "Re"),
+    "Tank": ("k", "Ta"),
+    "Curve": ("u",),
+    "Customer": ("c", "Ju"),
+}
+
+
 def parse_digwater_metadata_and_topology(
     digwater_path: Path | str | None,
     node_ids: set[str] | None = None,
@@ -258,7 +298,7 @@ def parse_digwater_metadata_and_topology(
     pump_ids_set: set[str] | None = None,
 ) -> dict[str, Any]:
     """Полный разбор .DigWater: метаданные модели, имена объектов, дополнительные свойства,
-    топология связей (Начальный/Конечный узел), статусы перекрытых участков и координаты.
+    топология связей (Начальный/Конечный узел), статусы перекрытых участков, потребители и координаты.
     """
     meta: dict[str, Any] = {
         "model_info": {},
@@ -276,6 +316,7 @@ def parse_digwater_metadata_and_topology(
         "valve_attrs": {},
         "reservoir_attrs": {},
         "tank_attrs": {},
+        "customer_attrs": {},
         "qh_curves": {},
     }
     if not digwater_path:
@@ -318,10 +359,10 @@ def parse_digwater_metadata_and_topology(
 
         raw_name = _get_field_ci(fields, "Name", "Наименование", "Имя", "Caption", "Title").strip()
         clean_nm = clean_object_name(raw_name)
-        if clean_nm:
-            meta["names"][cid] = clean_nm
-            meta["names"][object_id] = clean_nm
-            for pref in ("c", "e", "p", "v", "k", "u", "Ju", "Pi", "Pu", "Va", "Re", "Ta"):
+        if clean_nm and short_layer in _LAYER_ID_PREFIXES:
+            meta["names"].setdefault(cid, clean_nm)
+            meta["names"].setdefault(object_id, clean_nm)
+            for pref in _LAYER_ID_PREFIXES[short_layer]:
                 meta["names"][f"{pref}{cid}"] = clean_nm
 
         # Извлечение координат из X/Y или hex-геометрии
@@ -337,8 +378,9 @@ def parse_digwater_metadata_and_topology(
                 pt = geom_pts[0]
             if pt is not None:
                 meta["nodes"][cid] = pt
-                meta["nodes"][f"c{cid}"] = pt
-                meta["nodes"][f"Ju{cid}"] = pt
+                if short_layer == "Junction":
+                    meta["nodes"][f"c{cid}"] = pt
+                    meta["nodes"][f"Ju{cid}"] = pt
 
             elev_v = _safe_float(_get_field_ci(fields, "Elev", "Elevation", "Z", "Отметка", "Высота"))
             req_p = _safe_float(_get_field_ci(fields, "ReqPress", "RequiredPressure", "FreeHead", "ReqHead", "Требуемый"))
@@ -346,10 +388,12 @@ def parse_digwater_metadata_and_topology(
             demand_v = _safe_float(_get_field_ci(fields, "Demand", "BaseDemand", "Потребление", "Расход"))
             pattern_v = _get_field_ci(fields, "Pattern", "Schedule", "График").strip()
             head_v = _safe_float(_get_field_ci(fields, "Head", "H", "Напор", "Level"))
+            addr_v = _get_field_ci(fields, "Address", "Адрес", "Street", "Улица").strip()
 
             attr_dict = {
                 "id": cid,
                 "name": clean_nm,
+                "address": addr_v,
                 "elev": elev_v,
                 "elevation_m": elev_v,
                 "req_press": req_p,
@@ -380,6 +424,34 @@ def parse_digwater_metadata_and_topology(
                     meta["nodes"][f"k{cid}"] = pt
                     meta["nodes"][f"Ta{cid}"] = pt
 
+        elif short_layer == "Customer":
+            # Потребители, привязанные к узлам сети (дополняют имя, отбор и этажность узла)
+            node_ref = clean_object_id(_get_field_ci(fields, "Node", "Junction", "Junc", "Узел", "NodeID").strip())
+            dem_c = _safe_float(_get_field_ci(fields, "Demand", "BaseDemand", "Потребление", "Расход"))
+            fl_c = _safe_float(_get_field_ci(fields, "Floors", "Stage", "Этажность", "Этажи"))
+            addr_c = _get_field_ci(fields, "Address", "Адрес", "Street", "Улица").strip()
+            meta["customer_attrs"][cid] = {
+                "id": cid,
+                "name": clean_nm,
+                "node_id": node_ref,
+                "demand": dem_c,
+                "floors": int(round(fl_c)) if fl_c and fl_c > 0 else None,
+                "address": addr_c,
+            }
+            if node_ref:
+                if clean_nm:
+                    meta["names"].setdefault(node_ref, clean_nm)
+                    meta["names"].setdefault(f"Ju{node_ref}", clean_nm)
+                n_entry = meta["node_attrs"].setdefault(node_ref, {"id": node_ref, "name": clean_nm})
+                if dem_c is not None and dem_c > 0:
+                    prev_d = n_entry.get("base_demand_m3_h") or 0.0
+                    n_entry["base_demand_m3_h"] = float(prev_d) + float(dem_c)
+                    n_entry["demand"] = n_entry["base_demand_m3_h"]
+                if fl_c and fl_c > 0 and not n_entry.get("floors"):
+                    n_entry["floors"] = int(round(fl_c))
+                if addr_c and not n_entry.get("address"):
+                    n_entry["address"] = addr_c
+
         elif short_layer in ("Pipe", "Pump", "Valve"):
             sn_raw = _get_field_ci(fields, "Start", "Node1", "StartNode", "FromNode", "Начало").strip()
             en_raw = _get_field_ci(fields, "Finish", "End", "Node2", "EndNode", "ToNode", "Конец").strip()
@@ -387,11 +459,12 @@ def parse_digwater_metadata_and_topology(
             en_cid = clean_object_id(en_raw)
             ltype = short_layer.upper()
             if sn_cid and en_cid:
-                for key_id in (cid, object_id, f"e{cid}", f"p{cid}", f"v{cid}", f"Pi{cid}", f"Pu{cid}", f"Va{cid}"):
+                layer_keys = [cid, object_id] + [f"{pref}{cid}" for pref in _LAYER_ID_PREFIXES[short_layer]]
+                for key_id in layer_keys:
                     meta["link_ends"][key_id] = (sn_cid, en_cid, ltype)
 
             status_raw = _get_field_ci(fields, "Status", "State", "Статус", "IsClosed", "Closed").strip().upper()
-            is_closed = status_raw in ("CLOSED", "ЗАКРЫТ", "ЗАКРЫТА", "ВЫКЛ", "OFF")
+            is_closed = status_raw in ("CLOSED", "ЗАКРЫТ", "ЗАКРЫТА", "ВЫКЛ", "OFF", "0", "FALSE")
 
             if short_layer == "Pipe":
                 if is_closed:

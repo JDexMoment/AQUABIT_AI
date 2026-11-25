@@ -43,6 +43,22 @@ def _safe_float(val: Any, default: float = math.nan) -> float:
         return default
 
 
+def _first_present(*vals: Any) -> Any:
+    """Возвращает первое непустое значение (не пропускает 0 и 0.0 в отличие от `or`)."""
+    for v in vals:
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def _preserve_series(raw_arr: list[Any]) -> list[float | None]:
+    out: list[float | None] = []
+    for x in raw_arr:
+        fv = _to_float(x)
+        out.append(fv)
+    return out
+
+
 def _ingest_from_json_and_digwater(
     json_path: Path,
     digwater_meta: dict[str, Any],
@@ -69,12 +85,12 @@ def _ingest_from_json_and_digwater(
     pipe_ids_set: set[str] = set()
     pump_ids_set: set[str] = set()
 
-    node_free_head_series: dict[str, list[float]] = {}
-    node_total_head_series: dict[str, list[float]] = {}
-    node_demand_series: dict[str, list[float]] = {}
-    pipe_flow_series: dict[str, list[float]] = {}
-    pump_flow_series: dict[str, list[float]] = {}
-    valve_flow_series: dict[str, list[float]] = {}
+    node_free_head_series: dict[str, list[float | None]] = {}
+    node_total_head_series: dict[str, list[float | None]] = {}
+    node_demand_series: dict[str, list[float | None]] = {}
+    pipe_flow_series: dict[str, list[float | None]] = {}
+    pump_flow_series: dict[str, list[float | None]] = {}
+    valve_flow_series: dict[str, list[float | None]] = {}
 
     obj_names = dict(digwater_meta.get("names") or {})
     dw_node_attrs = digwater_meta.get("node_attrs") or {}
@@ -91,13 +107,13 @@ def _ingest_from_json_and_digwater(
         otype = item["type"]
         props = item["properties"] or {}
         ts = item["time_series"] or {}
-        nm = clean_object_name(item.get("name") or obj_names.get(oid) or obj_names.get(cid) or "")
+        nm = clean_object_name(obj_names.get(oid) or obj_names.get(cid) or item.get("name") or "")
         if nm:
-            obj_names.setdefault(oid, nm)
+            obj_names[oid] = nm
             obj_names.setdefault(cid, nm)
 
-        x_val = _to_float(props.get("X") or props.get("x"))
-        y_val = _to_float(props.get("Y") or props.get("y"))
+        x_val = _to_float(_first_present(props.get("X"), props.get("x"), props.get("CoordX")))
+        y_val = _to_float(_first_present(props.get("Y"), props.get("y"), props.get("CoordY")))
         if x_val is not None and y_val is not None:
             coords_map[oid] = [float(x_val), float(y_val)]
             coords_map[cid] = [float(x_val), float(y_val)]
@@ -106,24 +122,33 @@ def _ingest_from_json_and_digwater(
             node_ids_set.add(oid)
             dw_n = dw_node_attrs.get(cid) or dw_node_attrs.get(oid) or {}
             z_val = _to_float(
-                props.get("Elevation")
-                or props.get("elevation")
-                or props.get("Z")
-                or dw_n.get("elevation_m")
+                _first_present(
+                    props.get("elev"),
+                    props.get("Elev"),
+                    props.get("Elevation"),
+                    props.get("elevation"),
+                    props.get("Z"),
+                    props.get("z"),
+                    dw_n.get("elevation_m"),
+                )
             )
             if z_val is not None:
                 elev_map[oid] = float(z_val)
                 elev_map[cid] = float(z_val)
 
             req_val = _to_float(
-                props.get("RequiredPressure")
-                or props.get("required_pressure")
-                or props.get("ReqPressure")
-                or dw_n.get("required_pressure_m")
+                _first_present(
+                    props.get("RequiredPressure"),
+                    props.get("required_pressure"),
+                    props.get("ReqPressure"),
+                    props.get("req_press"),
+                    props.get("ReqPress"),
+                    dw_n.get("required_pressure_m"),
+                )
             )
-            floors_val = _to_float(props.get("Floors") or props.get("floors") or dw_n.get("floors"))
+            floors_val = _to_float(_first_present(props.get("Floors"), props.get("floors"), dw_n.get("floors")))
             if (req_val is None or req_val <= 0) and floors_val is not None and floors_val > 0:
-                # По СП 31.13330.2021 п. 5.11: 10 м на 1 этаж + 4 м на каждый последующий
+                # По СП 31.13330.2012 п. 5.11: 10 м на 1 этаж + 4 м на каждый последующий
                 req_val = 10.0 + max(0.0, float(floors_val) - 1.0) * 4.0
             if req_val is not None and req_val > 0:
                 req_p_map[oid] = float(req_val)
@@ -135,15 +160,18 @@ def _ingest_from_json_and_digwater(
                 floors_map[oid] = fl_int
 
             dem_base = _to_float(
-                props.get("BaseDemand")
-                or props.get("Demand")
-                or props.get("demand")
-                or dw_n.get("base_demand_m3_h")
+                _first_present(
+                    props.get("BaseDemand"),
+                    props.get("base_demand"),
+                    props.get("Demand"),
+                    props.get("demand"),
+                    dw_n.get("base_demand_m3_h"),
+                )
             )
             if dem_base is not None and abs(float(dem_base)) > 1e-9:
                 base_demand[oid] = float(dem_base)
 
-            sch_str = str(props.get("Pattern") or props.get("Schedule") or dw_n.get("schedule") or "").strip()
+            sch_str = str(_first_present(props.get("Pattern"), props.get("pattern"), props.get("Schedule"), dw_n.get("schedule")) or "").strip()
             if sch_str and sch_str.lower() not in ("t", "nan", "none"):
                 node_schedules[oid] = [sch_str]
 
@@ -151,23 +179,27 @@ def _ingest_from_json_and_digwater(
             head_arr = ts.get("head")
             dem_arr = ts.get("demand")
             if free_arr:
-                node_free_head_series[oid] = [float(x) for x in free_arr if x is not None]
+                node_free_head_series[oid] = _preserve_series(free_arr)
             elif head_arr:
-                node_total_head_series[oid] = [float(x) for x in head_arr if x is not None]
+                node_total_head_series[oid] = _preserve_series(head_arr)
             if dem_arr:
-                node_demand_series[oid] = [float(x) for x in dem_arr if x is not None]
+                node_demand_series[oid] = _preserve_series(dem_arr)
 
         elif otype == "reserv":
             source_ids_set.add(oid)
             dw_r = dw_res_attrs.get(cid) or dw_res_attrs.get(oid) or {}
             h_val = _to_float(
-                props.get("Head")
-                or props.get("TotalHead")
-                or props.get("Elevation")
-                or dw_r.get("head_m")
+                _first_present(
+                    props.get("Head"),
+                    props.get("head"),
+                    props.get("TotalHead"),
+                    props.get("elev"),
+                    props.get("Elevation"),
+                    dw_r.get("head_m"),
+                )
             )
             if h_val is None and ts.get("head"):
-                h_arr = [float(x) for x in ts["head"] if x is not None]
+                h_arr = [fv for x in ts["head"] if (fv := _to_float(x)) is not None]
                 if h_arr:
                     h_val = round(sum(h_arr) / len(h_arr), 2)
             if h_val is not None:
@@ -189,13 +221,17 @@ def _ingest_from_json_and_digwater(
             tank_ids_set.add(oid)
             dw_t = dw_tank_attrs.get(cid) or dw_tank_attrs.get(oid) or {}
             h_val = _to_float(
-                props.get("Head")
-                or props.get("Elevation")
-                or props.get("InitLevel")
-                or dw_t.get("head_m")
+                _first_present(
+                    props.get("Head"),
+                    props.get("head"),
+                    props.get("elev"),
+                    props.get("Elevation"),
+                    props.get("InitLevel"),
+                    dw_t.get("head_m"),
+                )
             )
             if h_val is None and ts.get("head"):
-                h_arr = [float(x) for x in ts["head"] if x is not None]
+                h_arr = [fv for x in ts["head"] if (fv := _to_float(x)) is not None]
                 if h_arr:
                     h_val = round(sum(h_arr) / len(h_arr), 2)
             if h_val is not None:
@@ -216,33 +252,35 @@ def _ingest_from_json_and_digwater(
             pipe_ids_set.add(oid)
             dw_p = dw_pipe_attrs.get(cid) or dw_pipe_attrs.get(oid) or {}
             ends = dw_link_ends.get(oid) or dw_link_ends.get(cid) or ("", "")
-            sn = str(props.get("StartNode") or props.get("Node1") or props.get("start_node") or dw_p.get("start_node") or ends[0] or "").strip()
-            en = str(props.get("EndNode") or props.get("Node2") or props.get("end_node") or dw_p.get("end_node") or ends[1] or "").strip()
-            d_mm = _to_float(props.get("Diameter") or props.get("diameter") or props.get("D") or dw_p.get("diameter_mm")) or 0.0
-            l_m = _to_float(props.get("Length") or props.get("length") or props.get("L") or dw_p.get("length_m")) or 0.0
-            c_hw = _to_float(props.get("Roughness") or props.get("roughness") or props.get("C") or dw_p.get("roughness_c"))
-            st_raw = str(props.get("Status") or props.get("status") or dw_p.get("status") or "").strip().lower()
+            sn = str(_first_present(props.get("start"), props.get("Start"), props.get("StartNode"), props.get("Node1"), props.get("start_node"), dw_p.get("start_node"), ends[0]) or "").strip()
+            en = str(_first_present(props.get("finish"), props.get("Finish"), props.get("EndNode"), props.get("Node2"), props.get("end_node"), dw_p.get("end_node"), ends[1]) or "").strip()
+            d_mm = _to_float(_first_present(props.get("diam"), props.get("Diam"), props.get("Diameter"), props.get("diameter"), props.get("D"), dw_p.get("diameter_mm")))
+            l_m = _to_float(_first_present(props.get("len"), props.get("Len"), props.get("Length"), props.get("length"), props.get("L"), dw_p.get("length_m")))
+            c_hw = _to_float(_first_present(props.get("rough"), props.get("Rough"), props.get("Roughness"), props.get("roughness"), props.get("C"), dw_p.get("roughness_c")))
+            st_raw = str(_first_present(props.get("status"), props.get("Status"), dw_p.get("status")) or "").strip().lower()
             is_closed_prop = st_raw in ("closed", "закрыта", "закрыт", "0", "false", "выкл")
             raw_pipes.append({
                 "pipe_id": oid,
                 "clean_id": cid,
                 "start_node": sn,
                 "end_node": en,
-                "diameter_mm": float(d_mm),
-                "length_m": float(l_m),
+                "diameter_mm": float(d_mm) if d_mm is not None else 0.0,
+                "length_m": float(l_m) if l_m is not None else 0.0,
                 "hazen_williams_c": float(c_hw) if c_hw is not None else math.nan,
+                "material": str(_first_present(props.get("material"), props.get("Material"), dw_p.get("material")) or "").strip(),
+                "year": str(_first_present(props.get("year"), props.get("Year"), dw_p.get("year")) or "").strip(),
                 "is_closed_prop": is_closed_prop,
             })
             if ts.get("flow"):
-                pipe_flow_series[oid] = [float(x) for x in ts["flow"] if x is not None]
+                pipe_flow_series[oid] = _preserve_series(ts["flow"])
 
         elif otype == "pump":
             pump_ids_set.add(oid)
             dw_pu = dw_pump_attrs.get(cid) or dw_pump_attrs.get(oid) or {}
             ends = dw_link_ends.get(oid) or dw_link_ends.get(cid) or ("", "")
-            sn = str(props.get("StartNode") or props.get("Node1") or props.get("start_node") or dw_pu.get("start_node") or ends[0] or "").strip()
-            en = str(props.get("EndNode") or props.get("Node2") or props.get("end_node") or dw_pu.get("end_node") or ends[1] or "").strip()
-            curve_id = str(props.get("Curve") or props.get("HeadCurve") or props.get("curve_id") or dw_pu.get("curve_id") or "").strip()
+            sn = str(_first_present(props.get("start"), props.get("Start"), props.get("StartNode"), props.get("Node1"), props.get("start_node"), dw_pu.get("start_node"), ends[0]) or "").strip()
+            en = str(_first_present(props.get("finish"), props.get("Finish"), props.get("EndNode"), props.get("Node2"), props.get("end_node"), dw_pu.get("end_node"), ends[1]) or "").strip()
+            curve_id = str(_first_present(props.get("curve"), props.get("Curve"), props.get("HeadCurve"), props.get("curve_id"), dw_pu.get("curve_id")) or "").strip()
             raw_pumps.append({
                 "pump_id": oid,
                 "clean_id": cid,
@@ -251,15 +289,15 @@ def _ingest_from_json_and_digwater(
                 "curve_id": curve_id,
             })
             if ts.get("flow"):
-                pump_flow_series[oid] = [float(x) for x in ts["flow"] if x is not None]
+                pump_flow_series[oid] = _preserve_series(ts["flow"])
 
         elif otype == "valv":
             dw_v = dw_valve_attrs.get(cid) or dw_valve_attrs.get(oid) or {}
             ends = dw_link_ends.get(oid) or dw_link_ends.get(cid) or ("", "")
-            sn = str(props.get("StartNode") or props.get("Node1") or props.get("start_node") or dw_v.get("start_node") or ends[0] or "").strip()
-            en = str(props.get("EndNode") or props.get("Node2") or props.get("end_node") or dw_v.get("end_node") or ends[1] or "").strip()
-            vtype = str(props.get("Type") or props.get("ValveType") or dw_v.get("type_code") or "PRV").strip()
-            vset = _to_float(props.get("Setting") or props.get("setting") or dw_v.get("setting"))
+            sn = str(_first_present(props.get("start"), props.get("Start"), props.get("StartNode"), props.get("Node1"), props.get("start_node"), dw_v.get("start_node"), ends[0]) or "").strip()
+            en = str(_first_present(props.get("finish"), props.get("Finish"), props.get("EndNode"), props.get("Node2"), props.get("end_node"), dw_v.get("end_node"), ends[1]) or "").strip()
+            vtype = str(_first_present(props.get("type"), props.get("Type"), props.get("ValveType"), dw_v.get("type_code")) or "PRV").strip()
+            vset = _to_float(_first_present(props.get("setting"), props.get("Setting"), props.get("set"), props.get("Set"), dw_v.get("setting")))
             raw_valves.append({
                 "valve_id": oid,
                 "clean_id": cid,
@@ -269,7 +307,7 @@ def _ingest_from_json_and_digwater(
                 "setting": float(vset) if vset is not None else math.nan,
             })
             if ts.get("flow"):
-                valve_flow_series[oid] = [float(x) for x in ts["flow"] if x is not None]
+                valve_flow_series[oid] = _preserve_series(ts["flow"])
 
     # Дополняем параметрами из .DigWater для узлов, которые в Report.json содержали только временные ряды
     for nid in list(node_ids_set):
@@ -295,8 +333,11 @@ def _ingest_from_json_and_digwater(
 
     active_nodes = set(req_p_map.keys()) | set(base_demand.keys())
     for nid, d_arr in node_demand_series.items():
-        if any(float(x) > 1e-6 for x in d_arr):
+        if any(x is not None and float(x) > 1e-6 for x in d_arr):
             active_nodes.add(nid)
+    # Если в Report.json и .DigWater не заданы ни demand, ни ReqPress, включаем все узлы с рассчитанным напором
+    if not active_nodes:
+        active_nodes = set(node_free_head_series.keys()) | set(node_total_head_series.keys())
 
     if node_free_head_series:
         head_ts = build_timeseries_from_json_series(
@@ -395,52 +436,30 @@ def process_aquabit_city_v3(
     else:
         inp_path = Path(inp_path) if inp_path else None
 
-    # Читаем статические справочники CSV (если они есть в папке города) для восполнения недостающих атрибутов
-    df_nodes = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Узел.csv"))
-    df_pipes = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Труба.csv"))
-    df_pumps = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Насос.csv"))
-    df_valves = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Клапан.csv"))
-    df_valve_types = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Типы Клапанов.csv"))
-    df_tanks = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Резервуар.csv"))
-    df_src = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Источник.csv"))
-    df_qh = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Кривая QH.csv"))
-    df_cons = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Потребители Узел.csv"))
+    # 0. Приоритет источников: Report.json + .DigWater (CSV и .inp НЕ читаются при наличии JSON + .DigWater)
+    has_json = bool(resolved_json is not None and resolved_json.exists())
+    has_digwater = bool(resolved_dw is not None and resolved_dw.exists())
 
-    csv_node_ids = set(df_nodes[df_nodes.columns[0]]) if not df_nodes.empty else set()
-    csv_pipe_ids = set(df_pipes[df_pipes.columns[0]]) if not df_pipes.empty else set()
-    csv_pump_ids = set(df_pumps[df_pumps.columns[0]]) if not df_pumps.empty else set()
-    csv_source_ids = set(df_src[df_src.columns[0]]) if not df_src.empty else set()
-    csv_tank_ids = set(df_tanks[df_tanks.columns[0]]) if not df_tanks.empty else set()
+    use_json_primary = has_json
+    json_bundle: dict[str, Any] | None = None
+    topo_meta: dict[str, Any]
 
-    # 0. Топология и метаданные: приоритет .DigWater -> резерв .inp
-    if resolved_dw is not None and resolved_dw.exists():
-        topo_meta = parse_digwater_metadata_and_topology(
-            resolved_dw,
-            node_ids_set=csv_node_ids,
-            pipe_ids_set=csv_pipe_ids,
-            pump_ids_set=csv_pump_ids,
-            extra_node_ids=csv_source_ids | csv_tank_ids,
-        )
+    if has_digwater and resolved_dw is not None:
+        topo_meta = parse_digwater_metadata_and_topology(resolved_dw)
         topology_source = "digwater"
     else:
-        if inp_path is None and raw_city_dir.exists():
-            inps = sorted([p for p in raw_city_dir.iterdir() if p.is_file() and p.suffix.lower() == ".inp"])
-            if inps:
-                inp_path = inps[0]
-        topo_meta = parse_inp_metadata_and_topology(
-            inp_path,
-            csv_node_ids,
-            csv_pipe_ids,
-            csv_pump_ids,
-            extra_node_ids=csv_source_ids | csv_tank_ids,
-        )
-        topology_source = "inp" if (inp_path and inp_path.exists()) else "none"
+        topo_meta = {
+            "names": {},
+            "links": [],
+            "nodes": {},
+            "link_ends": {},
+            "closed_links": set(),
+            "reservoir_clean_ids": set(),
+            "tank_clean_ids": set(),
+            "qh_curves": {},
+        }
+        topology_source = "none"
 
-    obj_names: dict[str, str] = dict(topo_meta.get("names") or {})
-
-    # 1. Загрузка узлов, участков и временных рядов: приоритет Report.json -> резерв CSV
-    use_json_primary = bool(resolved_json is not None and resolved_json.exists())
-    json_bundle: dict[str, Any] | None = None
     if use_json_primary and resolved_json is not None:
         try:
             json_bundle = _ingest_from_json_and_digwater(
@@ -454,6 +473,55 @@ def process_aquabit_city_v3(
             )
             json_bundle = None
             use_json_primary = False
+
+    # Читаем CSV и .inp ТОЛЬКО в резервном режиме (когда отсутствует Report.json или .DigWater)
+    need_csv_fallback = not use_json_primary
+    need_inp_fallback = not has_digwater
+
+    if need_csv_fallback:
+        df_nodes = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Узел.csv"))
+        df_pipes = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Труба.csv"))
+        df_pumps = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Насос.csv"))
+        df_valves = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Клапан.csv"))
+        df_valve_types = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Типы Клапанов.csv"))
+        df_tanks = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Резервуар.csv"))
+        df_src = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Источник.csv"))
+        df_qh = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Кривая QH.csv"))
+        df_cons = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Потребители Узел.csv"))
+    else:
+        df_nodes = read_aquabit_csv(None)
+        df_pipes = read_aquabit_csv(None)
+        df_pumps = read_aquabit_csv(None)
+        df_valves = read_aquabit_csv(None)
+        df_valve_types = read_aquabit_csv(None)
+        df_tanks = read_aquabit_csv(None)
+        df_src = read_aquabit_csv(None)
+        # Если в .DigWater нет кривых Q-H, но в папке лежит Кривая QH.csv, аккуратно подгрузим только кривые
+        df_qh = read_aquabit_csv(_resolve_file_ci(raw_city_dir, "Кривая QH.csv")) if not (topo_meta.get("qh_curves")) else read_aquabit_csv(None)
+        df_cons = read_aquabit_csv(None)
+
+    csv_node_ids = set(df_nodes[df_nodes.columns[0]]) if not df_nodes.empty else set()
+    csv_pipe_ids = set(df_pipes[df_pipes.columns[0]]) if not df_pipes.empty else set()
+    csv_pump_ids = set(df_pumps[df_pumps.columns[0]]) if not df_pumps.empty else set()
+    csv_source_ids = set(df_src[df_src.columns[0]]) if not df_src.empty else set()
+    csv_tank_ids = set(df_tanks[df_tanks.columns[0]]) if not df_tanks.empty else set()
+
+    if need_inp_fallback:
+        if inp_path is None and raw_city_dir.exists():
+            inps = sorted([p for p in raw_city_dir.iterdir() if p.is_file() and p.suffix.lower() == ".inp"])
+            if inps:
+                inp_path = inps[0]
+        if inp_path and inp_path.exists():
+            topo_meta = parse_inp_metadata_and_topology(
+                inp_path,
+                csv_node_ids | (json_bundle["node_ids_set"] if json_bundle else set()),
+                csv_pipe_ids | (json_bundle["pipe_ids_set"] if json_bundle else set()),
+                csv_pump_ids | (json_bundle["pump_ids_set"] if json_bundle else set()),
+                extra_node_ids=csv_source_ids | csv_tank_ids,
+            )
+            topology_source = "inp"
+
+    obj_names: dict[str, str] = dict(topo_meta.get("names") or {})
 
     elev_map: dict[str, float] = {}
     req_p_map: dict[str, float] = {}
@@ -1031,7 +1099,7 @@ def process_aquabit_city_v3(
         cutoff_pipe_id = cutoff_pipe_by_node.get(cid)
 
         p_category = "normal"
-        node_diag = "Нормативный гидравлический режим (СП 31.13330.2021 п. 5.11–5.12)."
+        node_diag = "Нормативный гидравлический режим (СП 31.13330.2012 п. 5.11–5.13)."
         z_disp = round(z_node, 2) if z_node is not None else "—"
         if p_min is not None:
             if p_min < -3.0:
@@ -1083,13 +1151,13 @@ def process_aquabit_city_v3(
                 else:
                     node_diag = (
                         f"Дефицит свободного напора {deficit_abs_m} м (ΔP={margin_m} м) для {fl_cnt or 1}-эт. застройки при положительном напоре в магистрали Pмин={p_min} м "
-                        f"(вакуума нет; Pтреб={req_m} м по СП 31.13330 п. 5.11, Z={z_disp} м, трубы: {', '.join('#'+x for x in conn_pipe_ids)}). Требуется локальная ПНС (п. 7.3) или закольцовка."
+                        f"(вакуума нет; Pтреб={req_m} м по СП 31.13330 п. 5.11, Z={z_disp} м, трубы: {', '.join('#'+x for x in conn_pipe_ids)}). Требуется локальная ПНС (СП 31.13330 п. 5.11 Примечание 2) или закольцовка (п. 11.5)."
                     )
             elif p_max is not None and p_max > 60.0:
                 p_category = "excess"
                 node_diag = (
-                    f"Избыточный свободный напор Pмакс={p_max} м (превышает предел 60 м по СП 31.13330.2021 п. 5.12) при низкой отметке Z={z_disp} м. "
-                    f"Рекомендуется зонирование или установка PRV (п. 11.38) на вводе (участки {', '.join('#'+x for x in conn_pipe_ids)})."
+                    f"Избыточный свободный напор Pмакс={p_max} м (превышает предел 60 м по СП 31.13330.2012 п. 5.13) при низкой отметке Z={z_disp} м. "
+                    f"Рекомендуется зонирование или установка PRV на вводе (участки {', '.join('#'+x for x in conn_pipe_ids)})."
                 )
 
         sched_list = node_schedules.get(nid) or node_schedules.get(cid) or node_schedules.get(f"c{cid}") or []
@@ -1533,9 +1601,11 @@ def process_aquabit_city_v3(
         _sn_p = (all_node_props.get(sn_s) or all_node_props.get(sn_c_v) or all_node_props.get(f"c{sn_c_v}") or {}).get("p_mean")
         _en_p = (all_node_props.get(en_s) or all_node_props.get(en_c_v) or all_node_props.get(f"c{en_c_v}") or {}).get("p_mean")
         _dp_v = round(float(_sn_p) - float(_en_p), 2) if (isinstance(_sn_p, (int, float)) and isinstance(_en_p, (int, float))) else None
+        vid_cid = clean_object_id(vid_s)
         valves_table.append({
             "valve_id": vid_s,
-            "clean_id": clean_object_id(vid_s),
+            "clean_id": vid_cid,
+            "name": clean_object_name(obj_names.get(vid_s) or obj_names.get(vid_cid) or ""),
             "start_node": sn_c_v,
             "end_node": en_c_v,
             "type_id": vtype_raw,

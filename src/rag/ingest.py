@@ -4,7 +4,7 @@ import hashlib
 import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from rag.chunker import extract_sp31_pdf_chunks
 
 VECTOR_DIM = 384
@@ -56,16 +56,22 @@ def ingest_sp31_into_qdrant(
     qdrant_url: str | None = None,
     collection_name: str = COLLECTION_NAME,
     client: Any = None,
+    recreate: bool = False,
+    embedding_fn: Callable[[str], list[float]] | None = None,
 ) -> dict[str, Any]:
-    """Записывает чанки СП 31.13330 по пунктам в Qdrant (или возвращает структурированный индекс)."""
+    """Записывает чанки СП 31.13330 по пунктам в Qdrant (или переиспользует существующую коллекцию)."""
+    embed = embedding_fn or compute_dense_embedding
     chunks = extract_sp31_pdf_chunks(pdf_path)
     points_data: list[dict[str, Any]] = []
+    vec_dim = VECTOR_DIM
     for idx, ch in enumerate(chunks, 1):
         full_text = (
             f"{ch.get('clause_id', '')} {ch.get('title', '')}. "
             f"{ch.get('text', '')} {' '.join(ch.get('keywords', []))}"
         )
-        vec = compute_dense_embedding(full_text)
+        vec = list(embed(full_text))
+        if idx == 1 and vec:
+            vec_dim = len(vec)
         points_data.append({
             "id": idx,
             "vector": vec,
@@ -73,10 +79,11 @@ def ingest_sp31_into_qdrant(
         })
 
     qdrant_used = False
+    reused_existing = False
     active_client = client
     try:
         from qdrant_client import QdrantClient  # type: ignore[import-not-found]
-        from qdrant_client.models import Distance, PointStruct, VectorParams  # type: ignore[import-not-found]
+        from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, VectorParams  # type: ignore[import-not-found]
 
         if active_client is None:
             if qdrant_url:
@@ -88,17 +95,44 @@ def ingest_sp31_into_qdrant(
             else:
                 active_client = QdrantClient(":memory:")
 
-        if active_client.collection_exists(collection_name):
-            active_client.delete_collection(collection_name)
-        active_client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
-        )
-        q_points = [
-            PointStruct(id=pt["id"], vector=pt["vector"], payload=pt["payload"])
-            for pt in points_data
-        ]
-        active_client.upsert(collection_name=collection_name, points=q_points)
+        exists = bool(active_client.collection_exists(collection_name))
+        need_upsert = recreate or not exists
+        if exists and not recreate:
+            try:
+                cnt_res = active_client.count(collection_name=collection_name, exact=True)
+                existing_cnt = int(getattr(cnt_res, "count", 0))
+                if existing_cnt == len(points_data) and existing_cnt > 0:
+                    reused_existing = True
+                    need_upsert = False
+                else:
+                    need_upsert = True
+            except Exception:
+                need_upsert = True
+
+        if need_upsert:
+            if exists:
+                active_client.delete_collection(collection_name)
+            active_client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=vec_dim, distance=Distance.COSINE),
+            )
+            q_points = [
+                PointStruct(id=pt["id"], vector=pt["vector"], payload=pt["payload"])
+                for pt in points_data
+            ]
+            # Записываем батчами для устойчивости при больших PDF
+            batch_size = 128
+            for start in range(0, len(q_points), batch_size):
+                active_client.upsert(collection_name=collection_name, points=q_points[start:start + batch_size])
+            for field_name in ("Applies_to", "diag_codes", "clause_id"):
+                try:
+                    active_client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=field_name,
+                        field_schema=PayloadSchemaType.KEYWORD,
+                    )
+                except Exception:
+                    pass
         qdrant_used = True
     except ImportError:
         pass
@@ -106,6 +140,7 @@ def ingest_sp31_into_qdrant(
     return {
         "collection_name": collection_name,
         "qdrant_active": qdrant_used,
+        "reused_existing": reused_existing,
         "client": active_client,
         "chunks_count": len(points_data),
         "points": points_data,

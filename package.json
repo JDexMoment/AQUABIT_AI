@@ -1,0 +1,13 @@
+{
+  "name": "aquabit-ai-diagnostics",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI diagnostic reporting workbench and interactive preview for AquaBit hydraulic water-supply models",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "build": "node --check server.mjs && python3 -m py_compile src/preview_bridge.py src/v2_engine.py src/processing/pipeline.py src/processing/digwater.py src/processing/report_json.py src/rag/retriever.py src/llm/post_validator.py src/reporting/html_report.py",
+    "lint": "node --check server.mjs"
+  }
+}

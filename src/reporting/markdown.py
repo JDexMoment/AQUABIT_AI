@@ -4,11 +4,82 @@ import re
 import html
 from ontology.context import clean_object_id
 
-_OBJ_ID_TOKEN_RE = r"(?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\d{2,}"
+_OBJ_ID_TOKEN_RE = r"(?:(?:node|pipe|pump|valve):)?(?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\d{2,}"
+
+_PREFIX_TO_KIND = {
+    "node": "node",
+    "node_": "node",
+    "ju": "node",
+    "re": "node",
+    "ta": "node",
+    "pipe": "pipe",
+    "pipe_": "pipe",
+    "pi": "pipe",
+    "pump": "pump",
+    "pump_": "pump",
+    "pu": "pump",
+    "valve": "valve",
+    "valve_": "valve",
+    "va": "valve",
+}
+
+
+def _infer_object_kind(raw_token: str, context_text: str = "") -> str:
+    low = (raw_token or "").strip().lower()
+    m_exp = re.match(r"^(node|pipe|pump|valve):", low)
+    if m_exp:
+        return m_exp.group(1)
+    for pref, kind in _PREFIX_TO_KIND.items():
+        if low.startswith(pref):
+            return kind
+    ctx = (context_text or "").lower()
+    if any(w in ctx for w in ("насос", "агрегат", "скважин", "внс", "пнс")):
+        return "pump"
+    if any(w in ctx for w in ("труб", "участ", "водовод", "магистрал", "перемычк", "отвод")):
+        return "pipe"
+    if any(w in ctx for w in ("клапан", "задвижк", "prv", "psv", "fcv", "регулятор")):
+        return "valve"
+    return "node"
+
+
+def _strip_kind_and_clean(raw_token: str) -> str:
+    token = re.sub(r"^(?:node|pipe|pump|valve):", "", (raw_token or "").strip(), flags=re.IGNORECASE)
+    return clean_object_id(token)
+
+
+def _preprocess_raw_html_leaks(md: str) -> str:
+    """Нормализует случайно утекшие из LLM сырые теги <button> и <br> до экранирования HTML."""
+    text = md or ""
+
+    def _unwrap_btn(m: re.Match[str]) -> str:
+        attrs = m.group(1) or ""
+        inner = re.sub(r"<[^>]+>", "", m.group(2) or "").strip()
+        m_scroll = re.search(
+            r"scrollToTableRow\(\s*['\"](node|pipe|pump|valve)['\"]\s*,\s*['\"]#?([A-Za-z_]*\d+)['\"]\s*\)",
+            attrs,
+            flags=re.IGNORECASE,
+        )
+        if m_scroll:
+            kind = m_scroll.group(1).lower()
+            cid = clean_object_id(m_scroll.group(2))
+            return f"[{inner or '#' + cid}](table:{kind}:{cid})"
+        m_tbl = re.search(r"data-table-id=['\"]#?([A-Za-z_]*\d+)['\"]", attrs, flags=re.IGNORECASE)
+        if m_tbl:
+            cid = clean_object_id(m_tbl.group(1))
+            return f"[{inner or '#' + cid}](table:{cid})"
+        m_map = re.search(r"data-map-id=['\"]#?([A-Za-z_]*\d+)['\"]", attrs, flags=re.IGNORECASE)
+        if m_map:
+            cid = clean_object_id(m_map.group(1))
+            return f"[{inner or '#' + cid}](map:{cid})"
+        return inner
+
+    text = re.sub(r"<button\b([^>]*)>(.*?)</button>", _unwrap_btn, text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    return text
 
 
 def _markdown_to_clean_html(md: str) -> str:
-    lines = (md or "").splitlines()
+    lines = _preprocess_raw_html_leaks(md).splitlines()
     out = []
     in_ul = False
     in_ol = False
@@ -46,22 +117,33 @@ def _markdown_to_clean_html(md: str) -> str:
             ),
             s_escaped,
         )
-        # 2) Явные ссылки на таблицу: [Текст](table:3466703) или [Текст](table:node_3466703)
+
+        # 2) Явные ссылки на таблицу: [Текст](table:3466703), [Текст](table:node:3466703), [Текст](table:node_3466703)
+        def _make_table_btn(m: re.Match[str]) -> str:
+            label = m.group(1)
+            raw_tok = m.group(2)
+            cid = _strip_kind_and_clean(raw_tok)
+            win = s_escaped[max(0, m.start() - 40): min(len(s_escaped), m.end() + 20)]
+            kind = _infer_object_kind(raw_tok, label + " " + win)
+            return (
+                f'<button type="button" class="object-link" data-table-id="{cid}" data-table-kind="{kind}" '
+                f"onclick=\"scrollToTableRow('{kind}', '{cid}')\" "
+                f'title="Открыть объект #{cid} в таблице">{label}</button>'
+            )
+
         s_escaped = re.sub(
             rf"\[([^\]]+)\]\(table:#?({_OBJ_ID_TOKEN_RE})\)",
-            lambda m: (
-                f'<button type="button" class="object-link" data-table-id="{clean_object_id(m.group(2))}" '
-                f'title="Открыть объект #{clean_object_id(m.group(2))} в таблице">{m.group(1)}</button>'
-            ),
+            _make_table_btn,
             s_escaped,
             flags=re.IGNORECASE,
         )
+
         # 3) Явные ссылки на карту: [Текст](map:3466703) или [Текст](map:node_3466703)
         s_escaped = re.sub(
             rf"\[([^\]]+)\]\(map:#?({_OBJ_ID_TOKEN_RE})\)",
             lambda m: (
-                f'<button type="button" class="object-link object-link-map" data-map-id="{clean_object_id(m.group(2))}" '
-                f'title="Показать расположение #{clean_object_id(m.group(2))} на карте">{m.group(1)}</button>'
+                f'<button type="button" class="object-link object-link-map" data-map-id="{_strip_kind_and_clean(m.group(2))}" '
+                f'title="Показать расположение #{_strip_kind_and_clean(m.group(2))} на карте">{m.group(1)}</button>'
             ),
             s_escaped,
             flags=re.IGNORECASE,
@@ -72,15 +154,17 @@ def _markdown_to_clean_html(md: str) -> str:
 
         # Контекстный роутинг ID: по умолчанию -> таблица, если рядом контекст местоположения/карты -> карта
         def _make_ctx_btn(raw_id: str, full_str: str, start_idx: int, end_idx: int) -> str:
-            clean = clean_object_id(raw_id)
+            clean = _strip_kind_and_clean(raw_id)
             window = full_str[max(0, start_idx - 70): min(len(full_str), end_idx + 70)]
             if _MAP_CONTEXT_RE.search(window):
                 return (
                     f'<button type="button" class="object-link object-link-map" data-map-id="{clean}" '
                     f'title="Показать расположение #{clean} на карте">#{clean}</button>'
                 )
+            kind = _infer_object_kind(raw_id, window)
             return (
-                f'<button type="button" class="object-link" data-table-id="{clean}" '
+                f'<button type="button" class="object-link" data-table-id="{clean}" data-table-kind="{kind}" '
+                f"onclick=\"scrollToTableRow('{kind}', '{clean}')\" "
                 f'title="Открыть объект #{clean} в таблице (из таблицы — на карту)">#{clean}</button>'
             )
 

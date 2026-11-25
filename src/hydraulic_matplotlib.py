@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import math
 import os
 import tempfile
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Настраиваем окружение Matplotlib для стабильной работы без дисплея и в песочнице Windows
 if "MPLCONFIGDIR" not in os.environ:
@@ -194,20 +197,20 @@ def plot_diurnal_hydraulic_balance(facts: dict[str, Any]) -> tuple[plt.Figure, s
     ax1.set_title(f"Суточный баланс подачи и водоразбора (24 ч) — {facts.get('city_name', '')}", fontsize=12, fontweight="bold")
     ax1.legend(loc="upper right", framealpha=0.9, fontsize=9.5)
 
-    # Нижний график: разность подачи и потребления (заполнение/опорожнение РЧВ)
+    # Нижний график: разность подачи и потребления (потери воды + перекачка / регулирование РЧВ)
     ax2.set_facecolor("white")
     ax2.grid(True, linestyle="--", alpha=0.5, color=COLORS["border"])
     delta = [p - d for p, d in zip(q_pump, q_dem)]
     pos_delta = [max(0.0, d) for d in delta]
     neg_delta = [min(0.0, d) for d in delta]
 
-    ax2.bar(hours, pos_delta, color=COLORS["primary_light"], alpha=0.7, label="Аккумуляция в РЧВ (+)")
-    ax2.bar(hours, neg_delta, color=COLORS["warning"], alpha=0.7, label="Сработка РЧВ / Дефицит (-)")
+    ax2.bar(hours, pos_delta, color=COLORS["primary_light"], alpha=0.7, label="Превышение подачи: потери воды (физ.+комм.) и перекачка / РЧВ (+)")
+    ax2.bar(hours, neg_delta, color=COLORS["warning"], alpha=0.7, label="Покрытие пика из РЧВ / дефицит подачи (-)")
     ax2.axhline(0, color="black", lw=1.0)
     ax2.set_xlabel("Часы суток (00:00 – 23:00)", fontsize=11)
     ax2.set_ylabel("ΔQ, м³/ч", fontsize=10)
     ax2.set_xticks(hours)
-    ax2.legend(loc="lower right", framealpha=0.9, fontsize=8.5)
+    ax2.legend(loc="lower right", framealpha=0.9, fontsize=8.0)
 
     fig.tight_layout()
     return fig, figure_to_base64_png(fig)

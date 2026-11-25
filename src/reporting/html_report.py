@@ -141,6 +141,10 @@ def render_standalone_html_report(
                  f"Режим: {v_bin} (#{sn_clean} → #{en_clean})")
             )
             _llm_adv_p = p.get("ai_advice") or _ai_pipes_map.get(_cid_p) or _ai_pipes_map.get(pid)
+            _len_m = p.get("length_m")
+            _dh_m = p.get("total_headloss_m")
+            if _dh_m is None and isinstance(i_val, (int, float)) and isinstance(_len_m, (int, float)):
+                _dh_m = round(float(i_val) * float(_len_m) / 1000.0, 2)
             dedup_pipes.append({
                 "pipe_id": p.get("pipe_id"),
                 "clean_id": _cid_p,
@@ -148,9 +152,10 @@ def render_standalone_html_report(
                 "start_node": sn_clean,
                 "end_node": en_clean,
                 "diameter_mm": p.get("diameter_mm", "—"),
-                "length_m": p.get("length_m", "—"),
+                "length_m": _len_m if _len_m is not None else "—",
                 "velocity_max_m_s": v_val if v_val is not None else "—",
                 "headloss_m_km": i_val if i_val is not None else "—",
+                "total_headloss_m": _dh_m if _dh_m is not None else "—",
                 "hazen_williams_c": c_val if c_val is not None else "—",
                 "flow_m3_h": p.get("flow_max_m3_h", "—"),
                 "velocity_bin": v_bin,
@@ -196,6 +201,7 @@ def render_standalone_html_report(
             {
                 "valve_id": v.get("valve_id"),
                 "clean_id": v.get("clean_id"),
+                "name": clean_object_name(v.get("name")),
                 "start_node": clean_object_id(v.get("start_node")) or "—",
                 "end_node": clean_object_id(v.get("end_node")) or "—",
                 "type_code": f"{v.get('type_code')} ({v.get('type_id')})",
@@ -822,6 +828,9 @@ function formatTextWithObjectButtons(str, defaultTarget = 'map') {{
 
 function renderMarkdownToHTML(mdText, defaultTarget = 'table') {{
   if (!mdText) return '';
+  const preprocessed = String(mdText)
+    .replace(/<button\\b[^>]*>([\\s\\S]*?)<\\/button>/gi, '$1')
+    .replace(/<br\\s*\\/?>/gi, '\\n');
   const fmtInline = (line) => {{
     let s = String(line || '')
       .replace(/`(\\[[^\\]]+\\]\\((?:table|map|filter):[^)]+\\))`/g, '$1')
@@ -832,11 +841,12 @@ function renderMarkdownToHTML(mdText, defaultTarget = 'table') {{
     s = s.replace(/\\[([^\\]]+)\\]\\(filter:([a-zA-Z0-9_]+):([a-zA-Z0-9_]+)\\)/g,
       (_, txt, tab, preset) => `<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('${{tab}}','${{preset}}')" title="Применить фильтр в таблице">${{txt}} ↗</button>`
     );
-    // 2) Явные ссылки на таблицу: [Текст](table:ID)
-    s = s.replace(/\\[([^\\]]+)\\]\\(table:#?((?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\\d+)\\)/gi,
-      (_, txt, rawId) => {{
+    // 2) Явные ссылки на таблицу: [Текст](table:ID) или [Текст](table:node:ID)
+    s = s.replace(/\\[([^\\]]+)\\]\\(table:#?(?:(node|pipe|pump|valve):)?((?:node_|pipe_|pump_|valve_|source_|tank_|Ju|Pi|Pu|Va|Re|Ta|[ceputvk])?\\d+)\\)/gi,
+      (_, txt, kind, rawId) => {{
         const cid = clean_object_id(rawId);
-        return `<button type="button" class="object-link" data-table-id="${{cid}}" title="Открыть #${{cid}} в таблице">${{txt}}</button>`;
+        const k = (kind || 'auto').toLowerCase();
+        return `<button type="button" class="object-link" data-table-id="${{cid}}" onclick="scrollToTableRow('${{k}}', '${{cid}}')" title="Открыть #${{cid}} в таблице">${{txt}}</button>`;
       }}
     );
     // 3) Явные ссылки на карту: [Текст](map:ID)
@@ -871,7 +881,7 @@ function renderMarkdownToHTML(mdText, defaultTarget = 'table') {{
     return parts.join('');
   }};
 
-  const rawLines = String(mdText).replace(/\\r\\n/g, '\\n').split('\\n');
+  const rawLines = preprocessed.replace(/\\r\\n/g, '\\n').split('\\n');
   const out = [];
   let inUl = false, inOl = false;
   const closeLists = () => {{
@@ -1587,7 +1597,7 @@ function buildContextExactAnalysisHTML(kind) {{
       return `<strong>Диагностика агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
       • <b>Фактическое состояние:</b> Насос находится в резерве / отключен (подача <b>Q = 0 м³/ч</b>, развиваемый напор <b>H = 0 м</b>; паспортный номинал кривой <code>${{cur.curve_id}}</code>: Qном = ${{qNom}} м³/ч, Hном = ${{hNom}} м).<br>
       • <b>Состояние приемного узла коллектора <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button>:</b> Отметка Z = ${{colZ}} м, фактическое давление в узле P = <b>${{colP}} м</b>${{nbPipes ? ` (отходящие участки: ${{nbPipes}})` : ''}}.<br>
-      • <b>Мероприятие в ПК «Аквабит»:</b> Если агрегат <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> должен работать по технологическому графику, проверьте его статус в <code>Поток Насос.csv</code> и открытость отходящего участка за узлом <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button>.`;
+      • <b>Мероприятие в ПК «Аквабит»:</b> По СП 31.13330.2012 п. 10.3 (Таблица 23) отключенный агрегат относится к штатному холодному резерву. Если агрегат <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> должен работать по графику, проверьте его статус в модели (<code>Report.json</code> / <code>.digWater</code>) и открытость отходящего участка за узлом <button type="button" class="object-link" data-map-id="${{enId}}">#${{enId}}</button>.`;
     }}
 
     return `<strong>Диагностика работающего агрегата <button type="button" class="object-link" data-map-id="${{cur.clean_id}}">#${{cur.clean_id}}</button> (${{isBh ? 'Скважинный 1-го подъема' : 'Сетевой насос НС'}}):</strong><br>
@@ -1604,15 +1614,18 @@ function buildContextExactAnalysisHTML(kind) {{
     return `<strong>Разбор распределения свободного напора (${{pressureChartMode === 'points' ? 'Режим точек дефицита' : 'Суточный коридор 24 ч'}}):</strong><br>
     • <b>Диктующий узел депрессии:</b> Абонент <button type="button" class="object-link" data-map-id="${{worst.clean_id}}">#${{worst.clean_id || '—'}}</button> (${{worst.floors ?? 1}} эт., Z = ${{worst.z ?? '—'}} м) имеет минимальный свободный напор <b>Pсвоб = ${{worst.p_free ?? '—'}} м</b> при требуемом Pтреб = ${{worst.p_req ?? '—'}} м (дефицит <b>ΔP = ${{worst.dp ?? 0}} м</b>).<br>
     • <b>Смежные подводящие участки к узлу #${{worst.clean_id}}:</b> ${{nbLinks || 'уточните на карте'}}.<br>
-    • <b>Переход к выборке:</b> <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'deficit')">Отфильтровать все ${{pts.length}} узлов с дефицитом в таблице ↗</button> или <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'data_error')">Показать узлы с вакуумом P &lt; -3.0 м ↗</button>.`;
+    • <b>Переход к выборке:</b> <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'deficit')">Отфильтровать все ${{pts.length}} узлов с дефицитом в таблице ↗</button> или <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('nodes', 'data_error')">Показать узлы с артефактами P &lt; -3.0 м ↗</button>.`;
   }}
 
   if (kind === 'bottlenecks') {{
     const pts = DATA.bottleneck_pipes_points || [];
     const top = pts[0] || {{}};
     const totBneck = DATA.bottleneck_pipes_total_count || pts.length;
+    const dhVal = (top.total_loss_m !== undefined && top.total_loss_m !== null)
+      ? top.total_loss_m
+      : (typeof top.i === 'number' && typeof top.l === 'number' ? Number(((top.i * top.l) / 1000).toFixed(2)) : '—');
     return `<strong>Разбор гидравлических узких мест (всего проблемных участков: ${{totBneck}} шт.):</strong><br>
-    • <b>Главный дроссель сети:</b> Участок <button type="button" class="object-link" data-map-id="${{top.clean_id}}">#${{top.clean_id || '—'}}</button> между узлами <button type="button" class="object-link" data-map-id="${{top.sn}}">#${{top.sn || '—'}}</button> и <button type="button" class="object-link" data-map-id="${{top.en}}">#${{top.en || '—'}}</button> (D = ${{top.d ?? 0}} мм, L = ${{top.l ?? 0}} м, C = ${{top.c ?? '—'}}) теряет <b>${{top.i ?? 0}} м/км</b> при скорости <b>${{top.v ?? 0}} м/с</b> и расходе ${{top.q ?? 0}} м³/ч.<br>
+    • <b>Главный дроссель сети:</b> Участок <button type="button" class="object-link" data-map-id="${{top.clean_id}}">#${{top.clean_id || '—'}}</button> между узлами <button type="button" class="object-link" data-map-id="${{top.sn}}">#${{top.sn || '—'}}</button> и <button type="button" class="object-link" data-map-id="${{top.en}}">#${{top.en || '—'}}</button> (D = ${{top.d ?? 0}} мм, L = ${{top.l ?? 0}} м, C = ${{top.c ?? '—'}}) имеет удельный уклон <b>i = ${{top.i ?? 0}} м/км</b> (фактическая потеря <b>Δh = ${{dhVal}} м</b>) при скорости <b>${{top.v ?? 0}} м/с</b> и расходе ${{top.q ?? 0}} м³/ч.<br>
     • <b>Причина и мероприятие в Аквабит:</b> ${{formatTextWithObjectButtons(top.advice)}}<br>
     • <b>Быстрый фильтр:</b> <button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'bottlenecks')">Показать и отсортировать узкие места в таблице труб ↗</button>.`;
   }}
@@ -1625,7 +1638,7 @@ function buildContextExactAnalysisHTML(kind) {{
     return `<strong>Разбор распределения скоростей потока по участкам сети:</strong><br>
     • <b>Оптимальное ядро (0.50–1.50 м/с):</b> <b>${{optCnt}} участков</b> обеспечивают нормативный гидравлический уклон без застоя.<br>
     • <b>Перекрытые задвижками участки (Q = 0):</b> <b>${{closedCnt}} шт.</b> (<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'closed')">Отфильтровать в таблице ↗</button>) — проверить необходимость открытия для закольцовки зон депрессии.<br>
-    • <b>Малопроточные зоны (&lt; 0.10 м/с):</b> <b>${{stagCnt}} шт.</b> (<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'stagnant')">Отфильтровать в таблице ↗</button>) — рекомендуется перераспределение потоков и ревизия тупиковых линий.`;
+    • <b>Малопроточные зоны (&lt; 0.10 м/с):</b> <b>${{stagCnt}} шт.</b> (<button type="button" class="filter-action-link" onclick="applyQuickFilterFromAI('pipes', 'stagnant')">Отфильтровать в таблице ↗</button>) — рекомендуется перераспределение потоков и ревизия тупиковых линий (СП 31.13330.2012 п. 11.5).`;
   }}
 
   if (kind === 'valves') {{
@@ -1648,7 +1661,7 @@ function buildContextExactAnalysisHTML(kind) {{
       : '';
     return `<strong>Разбор суточного баланса подачи насосов и водопотребления (24 ч):</strong><br>
     • <b>Пиковые нагрузки:</b> Максимальное часовое потребление абонентов (синяя линия) достигает <b>${{maxDem.toFixed(1)}} м³/ч</b>, суммарная пиковая подача насосных станций (изумрудная пунктирная линия) — <b>${{maxPmp.toFixed(1)}} м³/ч</b>.${{stageLine}}<br>
-    • <b>Инженерный вывод:</b> Основная разница между подачей насосов в сеть и полезным водопотреблением (реализацией абонентам) — это <b>потери воды в сети</b> (физические утечки из-за износа и избыточного напора P &gt; 60 м по СП 31.13330 п. 5.12 + коммерческие потери / несанкционированное потребление), а также учет многоступенчатой перекачки, тогда как резервуары чистой воды (РЧВ, СП 31.13330 п. 12.1–12.5) лишь сглаживают внутрисуточную часовую неравномерность водоразбора.`;
+    • <b>Инженерный вывод:</b> Основная разница между подачей насосов в сеть и полезным водопотреблением (реализацией/продажей абонентам) — это <b>потери воды в сети</b>: физические потери (утечки, аварии) и коммерческие потери (несанкционированное потребление, неучтенный водоразбор), усиливающиеся при избыточном напоре P &gt; 60 м (СП 31.13330.2012 п. 5.13), а также учет многоступенчатой перекачки, тогда как резервуары чистой воды (РЧВ, СП 31.13330.2012 п. 12.1–12.5) лишь сглаживают внутрисуточную часовую неравномерность водоразбора.`;
   }}
   return '';
 }}
@@ -1670,7 +1683,7 @@ async function generateLiveAnalysis(kind) {{
   const target = scrollEl.querySelector('.stream-target');
   const statusEl = scrollEl.querySelector('.ai-box-status');
 
-  const sysPrompt = 'Ты главный инженер-гидравлик ПК «Аквабит». Дай однозначный, краткий и точный инженерный вывод строго по переданным цифрам и ID. Для сравнения параметров ссылайся на таблицу как #ID или [объект #ID](table:ID), а если важно расположение на схеме — [объект #ID на карте](map:ID). Без шаблонных оговорок и лишней воды.';
+  const sysPrompt = 'Ты главный инженер-гидравлик ПК «Аквабит». Дай однозначный, краткий и точный инженерный вывод строго по переданным цифрам и ID. ЖЕСТКИЕ ПРАВИЛА: напоры строго в м вод. ст. (без кПа/бар); дефицит при Pсвоб > 0 — не вакуум; отключенный насос Q=0 — штатный резерв (СП 31.13330 п. 10.3); разница подачи и реализации — потери воды (физические + коммерческие), а не аккумуляция в РЧВ; без сырого HTML (<button>, <br>) и без выдуманных файлов .cs. Для ссылок используй #ID или [объект #ID на карте](map:ID).';
   const userPrompt = `Проанализируй текущее состояние графика:\\n${{plainCtx}}`;
 
   const llmRes = await streamLocalLLM(
@@ -2292,9 +2305,13 @@ document.getElementById('mapReset').onclick = () => {{
 }};
 document.getElementById('mapFind').onclick = () => focusMapObject(document.getElementById('mapSearch').value);
 
-function jumpToObjectInTable(rawId) {{
+function jumpToObjectInTable(rawId, preferredKind = null) {{
   const cid = clean_object_id(rawId);
-  const tabOrder = ['pumps', 'pipes', 'nodes', 'valves'];
+  const kindToTab = {{ node: 'nodes', nodes: 'nodes', pipe: 'pipes', pipes: 'pipes', pump: 'pumps', pumps: 'pumps', valve: 'valves', valves: 'valves' }};
+  const prefTab = preferredKind ? kindToTab[String(preferredKind).toLowerCase()] : null;
+  const tabOrder = prefTab
+    ? [prefTab, ...['pumps', 'pipes', 'nodes', 'valves'].filter(t => t !== prefTab)]
+    : ['pumps', 'pipes', 'nodes', 'valves'];
   let foundTab = null;
   for (const t of tabOrder) {{
     if ((DATA.tables[t] || []).some(r => String(r.clean_id) === cid)) {{
@@ -2318,11 +2335,16 @@ function jumpToObjectInTable(rawId) {{
   }}, 120);
 }}
 
+function scrollToTableRow(kind, rawId) {{
+  jumpToObjectInTable(rawId, kind);
+}}
+
 document.addEventListener('click', ev => {{
   const tblBtn = ev.target.closest('[data-table-id]');
   if (tblBtn) {{
+    if (tblBtn.hasAttribute('onclick')) return;
     ev.preventDefault();
-    jumpToObjectInTable(tblBtn.dataset.tableId);
+    jumpToObjectInTable(tblBtn.dataset.tableId, tblBtn.dataset.tableKind || null);
     return;
   }}
   const mapBtn = ev.target.closest('[data-map-id]');
@@ -2397,7 +2419,8 @@ const tableSchemas = {{
     {{ key: 'diameter_mm', label: 'Диаметр, мм' }},
     {{ key: 'length_m', label: 'Длина, м' }},
     {{ key: 'velocity_max_m_s', label: 'Скорость V, м/с' }},
-    {{ key: 'headloss_m_km', label: 'Потери i, м/км', isCrit: r => Number(r.headloss_m_km) >= 15 }},
+    {{ key: 'headloss_m_km', label: 'Уклон i, м/км', isCrit: r => Number(r.headloss_m_km) >= 15 }},
+    {{ key: 'total_headloss_m', label: 'Потеря Δh, м', isCrit: r => Number(r.total_headloss_m) >= 5 }},
     {{ key: 'hazen_williams_c', label: 'Коэфф. C' }},
     {{ key: 'flow_m3_h', label: 'Поток Q, м³/ч' }},
     {{ key: 'advice', label: 'Инженерный вывод (ИИ / Граф)', isRichAdvice: true }}
@@ -2760,7 +2783,10 @@ function renderTable() {{
         const chartBtn = hasChartForRow(currentTable, r)
           ? `<button type="button" class="chart-jump-btn" onclick="jumpFromTableToChart('${{currentTable}}','${{safeId}}')" title="Перейти к объекту #${{safeId}} на графике">📈</button>`
           : '';
-        td.innerHTML = `<button type="button" class="object-link object-link-map" data-map-id="${{safeId}}" title="Показать и подсветить #${{safeId}} на карте">${{v}}</button>${{chartBtn}}`;
+        const objName = (r.name && String(r.name).trim() && String(r.name).trim() !== safeId)
+          ? `<div style="font-size:11px;color:#475569;margin-top:2px;max-width:165px;white-space:normal;line-height:1.25;">${{String(r.name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}}</div>`
+          : '';
+        td.innerHTML = `<button type="button" class="object-link object-link-map" data-map-id="${{safeId}}" title="Показать и подсветить #${{safeId}} на карте">${{v}}</button>${{chartBtn}}${{objName}}`;
       }} else if (col.isNodeRef && v !== '—') {{
         td.innerHTML = `<button type="button" class="object-link object-link-map" data-map-id="${{v}}" title="Показать узел #${{v}} на карте">#${{v}}</button>`;
       }} else if (col.isBadge) {{
@@ -2778,6 +2804,7 @@ function renderTable() {{
 
 function buildRowContextPayload(tab, r) {{
   const payload = {{ table: tab, id: r.clean_id }};
+  if (r.name) payload.name = r.name;
   if (tab === 'nodes') {{
     payload.z_m = r.elevation_m;
     payload.floors = r.floors;
@@ -2796,6 +2823,7 @@ function buildRowContextPayload(tab, r) {{
     payload.l_m = r.length_m;
     payload.v_m_s = r.velocity_max_m_s;
     payload.i_m_km = r.headloss_m_km;
+    payload.total_headloss_m = r.total_headloss_m;
     payload.c_hw = r.hazen_williams_c;
     payload.q_m3_h = r.flow_m3_h;
     payload.velocity_bin = r.velocity_bin;

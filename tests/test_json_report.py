@@ -219,3 +219,149 @@ def test_post_validator_and_markdown_link_rendering() -> None:
 
     metrics = evaluate_report_quality_metrics(val_res["corrected_text"], dummy_facts, rendered)
     assert metrics["ui_link_integrity"] == 1.0
+
+
+def test_real_aquabit_short_json_keys_and_no_csv_read(tmp_path: Path) -> None:
+    """Проверяет чтение коротких ключей Report.json (elev, start, finish, diam, len, rough),
+    нулевую отметку Z=0.0, отсутствие demand, и что CSV/.inp не читаются при наличии JSON + .digWater."""
+    city_dir = tmp_path / "short_keys_city"
+    city_dir.mkdir()
+
+    # Подкладываем битый CSV и битый INP, чтобы убедиться, что пайплайн их игнорирует
+    (city_dir / "Напор Узел.csv").write_bytes(b"\xff\xfeBROKEN_CSV_SHOULD_NOT_BE_READ")
+    (city_dir / "legacy.inp").write_text("[JUNCTIONS]\n99999 999\n", encoding="utf-8")
+
+    # Двухстрочный CGLayer + слой Customer + коллизия числовых ID (узел 100 и труба 100) + WKB в столбце Geom
+    import struct
+    wkb_point = struct.pack("<BIdd", 1, 1, 55.5, 66.5).hex()
+    dw_text = (
+        "Version=1.0\n\n"
+        "Model\x08Junction\x1aType=Point\n"
+        "ID\tName\tElev\tGeom\n"
+        f"100\tУзел Низинный\t0.0\t{wkb_point}\n"
+        "101\tУзел Высотный\t25.0\t\n\n"
+        "Model\x08Customer\x1aType=Point\tNodeID\tName\tFloors\tDemand\n"
+        "501\t101\tШкола №7\t5\t18.0\n\n"
+        "Model\x08Pipe\x1aType=Line\n"
+        "Код\tName\tStart\tFinish\tDiam\tLen\tRough\n"
+        "100\tМагистраль Восточная\t100\t101\t150\t400\t100\n\n"
+    )
+    (city_dir / "model.digWater").write_bytes(dw_text.encode("cp1251"))
+
+    # Report.json с короткими ключами, инлайн bare ID и без поля demand
+    report_json = (
+        '{\n'
+        '  "junc": [\n'
+        '    {"id": Ju100, "elev": 0.0, "req_press": 10.0, "head": [72.0, 70.0, 68.0]},\n'
+        '    {"id": "Ju101", "elev": 25.0, "head": [42.0, 41.0, 40.0]}\n'
+        '  ],\n'
+        '  "pipe": [\n'
+        '    {"id": "Pi100", "start": "Ju100", "finish": "Ju101", "diam": 150, "len": 400, "rough": 100, "flow": [95.0, 90.0, 85.0]}\n'
+        '  ]\n'
+        '}\n'
+    )
+    (city_dir / "Report.json").write_text(report_json, encoding="utf-8")
+
+    dw_meta = engine.parse_digwater_metadata_and_topology(city_dir / "model.digWater")
+    assert dw_meta["nodes"]["100"] == [55.5, 66.5]
+    assert dw_meta["node_attrs"]["100"]["elevation_m"] == 0.0
+    # Customer слился в узел 101 (этажность 5, расход 18.0)
+    assert dw_meta["node_attrs"]["101"]["floors"] == 5
+    assert dw_meta["node_attrs"]["101"]["base_demand_m3_h"] == 18.0
+    # Коллизия ID=100 между Junction и Pipe изолирована префиксами Ju100 / Pi100
+    assert dw_meta["names"]["Ju100"] == "Узел Низинный"
+    assert dw_meta["names"]["Pi100"] == "Магистраль Восточная"
+
+    facts, charts = engine.process_aquabit_city_v3(city_dir, timeline_buckets=24)
+    assert facts["data_source_type"] == "json_digwater"
+    # Узел 100: elev=0.0, head=72 -> P_max=72 > 60 м (избыток по СП 31.13330 п. 5.13)
+    assert facts["pressure_analysis"]["excess_over_60m_count"] == 1
+    # Узел 101: elev=25, floors=5 (P_req=26), head=40 -> P_min=15 -> дефицит 11 м
+    assert facts["pressure_analysis"]["real_required_pressure_deficit_count"] == 1
+    # Битый legacy.inp не подмешал узел 99999
+    assert "99999" not in charts["node_props"]
+
+
+def test_rag_chunker_dehyphenation_and_retriever_filtering(tmp_path: Path) -> None:
+    from rag.chunker import extract_sp31_pdf_chunks, parse_sp31_text_to_chunks
+
+    raw_doc = (
+        "СП 31.13330.2012\n"
+        "42\n"
+        "5 Расчетные расходы воды и свободные напоры\n"
+        "5.11. Минимальный свободный напор в сети водо-\n"
+        "снабжения населенного пункта при максимальном хозяйственно-питьевом водопотреблении на вводе в здание над поверхностью земли должен приниматься при одноэтажной застройке не менее 10 м.\n"
+        "Таблица 15 Нормативы напоров по этажности.\n"
+        "10.99. Специальный тестовый пункт по насосным станциям и регулированию подачи агрегатов.\n"
+    )
+    chunks = parse_sp31_text_to_chunks(raw_doc)
+    by_id = {c["clause_id"]: c for c in chunks}
+    assert "п. 5.11" in by_id
+    assert "водоснабжения" in by_id["п. 5.11"]["text"]
+    assert "Таблица 15" in by_id["п. 5.11"]["text"]
+    assert "п. 10.99" in by_id
+
+    txt_path = tmp_path / "SP_31.13330.2012.txt"
+    txt_path.write_text(raw_doc, encoding="utf-8")
+    merged = extract_sp31_pdf_chunks(txt_path)
+    merged_ids = {c["clause_id"] for c in merged}
+    assert "п. 5.11" in merged_ids
+    assert "п. 10.99" in merged_ids
+
+    ret = QdrantNormativeRetriever(pdf_path=txt_path)
+    pump_hits = ret.search("резервные насосы Таблица 23", applies_to="pump", top_k=2)
+    assert pump_hits and all("pump" in h["Applies_to"] for h in pump_hits)
+    ret.close()
+
+
+def test_post_validator_physical_invariants_and_self_correction() -> None:
+    from llm.post_validator import build_self_correction_prompt
+
+    facts = {
+        "pressure_analysis": {
+            "worst_deficit_nodes": [
+                {"clean_id": "3459771", "free_pressure_min_m": 4.65, "required_pressure_m": 22.0}
+            ]
+        },
+        "pumps_analysis": {
+            "all_pumps_table": [
+                {"clean_id": "3469087", "active": False, "q_working_m3_h": 0.0}
+            ]
+        },
+    }
+    bad_report = (
+        "В узле #3459771 возник вакуум. "
+        "В узле #999888 зафиксирован физический вакуум -53.5 м вод. ст. "
+        "Для снижения напора рекомендуется прикрыть задвижку на всасывании насоса и установить PRV перед насосом. "
+        "Насос #3469087 неисправен и вышел из строя. "
+        "Разница между подачей насосов и потреблением сети аккумулируется в резервуарах чистой воды (РЧВ) и компенсирует часы максимального водоразбора."
+    )
+    res = validate_ai_report_against_facts(bad_report, facts)
+    v_types = {v["type"] for v in res["violations"]}
+    assert "FALSE_VACUUM_ON_POSITIVE_PRESSURE" in v_types
+    assert "IMPOSSIBLE_PHYSICAL_VACUUM" in v_types
+    assert "SUCTION_THROTTLING_VIOLATION" in v_types
+    assert "FALSE_RESERVE_PUMP_FAULT" in v_types
+    assert "RCHV_WATER_LOSS_ERROR" in v_types
+    assert "HALLUCINATED_OBJECT_ID" in v_types
+    assert "Примечание верификатора" in res["corrected_text"]
+    assert "потери воды в сети" in res["corrected_text"]
+
+    fix_prompt = build_self_correction_prompt(bad_report, res)
+    assert "Исправь ТОЛЬКО" in fix_prompt
+
+    # Метрика должна штрафовать битый HTML с вложенными кнопками и &lt;br&gt;
+    bad_html_metrics = evaluate_report_quality_metrics(
+        res["corrected_text"],
+        facts,
+        rendered_html="<button><button>#3459771</button></button> &lt;br&gt; node_3459771",
+    )
+    assert bad_html_metrics["ui_link_integrity"] < 1.0
+
+
+def test_hydraulic_matplotlib_logger_and_diurnal_wording() -> None:
+    src_text = (Path(__file__).resolve().parents[1] / "src" / "hydraulic_matplotlib.py").read_text(encoding="utf-8")
+    assert "logger = logging.getLogger(__name__)" in src_text
+    assert "потери воды" in src_text
+    assert "Аккумуляция в РЧВ (+)" not in src_text
+
